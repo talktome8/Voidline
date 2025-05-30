@@ -47,14 +47,20 @@ function Grid:draw()
             local cellType = self.cells[i] and self.cells[i][j] or 'empty'
             local color = cellColors[cellType] or {1,1,1}
             love.graphics.setColor(color)
-            love.graphics.rectangle('fill', (i-1)*self.cellSize, (j-1)*self.cellSize, self.cellSize-1, self.cellSize-1, 6, 6)
+            local x = self.offsetX + (i-1)*self.cellSize
+            local y = self.offsetY + (j-1)*self.cellSize
+            love.graphics.rectangle('fill', x, y, self.cellSize-1, self.cellSize-1, 6, 6)
         end
     end
     love.graphics.setColor(1,1,1)
 end
 
 function Grid:closeArea(trail)
-    -- 1. Create a mask for unchecked cells (false)
+    -- Mark all trail cells as claimed first
+    for _, cell in ipairs(trail) do
+        self.cells[cell.i][cell.j] = 'claimed'
+    end
+    -- Flood fill to find all cells to claim
     local mask = {}
     for i=1,self.width do
         mask[i] = {}
@@ -62,12 +68,9 @@ function Grid:closeArea(trail)
             mask[i][j] = false
         end
     end
-    -- 2. Mark all trail cells as true in the mask and as claimed
     for _, cell in ipairs(trail) do
         mask[cell.i][cell.j] = true
-        self.cells[cell.i][cell.j] = 'claimed'
     end
-    -- 3. Flood fill from the borders (all edge cells that are not trail)
     local queue = {}
     for i=1,self.width do
         for j=1,self.height do
@@ -90,7 +93,6 @@ function Grid:closeArea(trail)
             end
         end
     end
-    -- 4. Any cell not marked in mask is captured (claimed)
     for i=1,self.width do
         for j=1,self.height do
             if not mask[i][j] then
@@ -98,6 +100,35 @@ function Grid:closeArea(trail)
             end
         end
     end
+end
+
+-- Set required percent for win (per level)
+Grid.requiredClaimedPercent = 0.5
+function Grid:setRequiredClaimedPercent(p)
+    self.requiredClaimedPercent = p
+end
+
+-- Dynamically set grid size to fit window
+function Grid:setSizeToWindow(windowWidth, windowHeight, margin)
+    margin = margin or 32
+    local cellW = math.floor((windowWidth - 2*margin) / self.width)
+    local cellH = math.floor((windowHeight - 2*margin) / self.height)
+    self.cellSize = math.min(cellW, cellH)
+    self.offsetX = math.floor((windowWidth - self.width*self.cellSize)/2)
+    self.offsetY = math.floor((windowHeight - self.height*self.cellSize)/2)
+end
+
+function Grid:getClaimedPercent()
+    local claimed, total = 0, 0
+    for i = 2, self.width-1 do
+        for j = 2, self.height-1 do
+            total = total + 1
+            if self.cells[i][j] == 'claimed' then
+                claimed = claimed + 1
+            end
+        end
+    end
+    return claimed / total
 end
 
 return Grid

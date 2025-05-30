@@ -28,7 +28,7 @@ function Player:update(dt, grid)
         if love.keyboard.isDown('right') then dx = 1 end
         if dx ~= 0 or dy ~= 0 then
             local ni, nj = self.i + dx, self.j + dy
-            if ni >= 1 and ni <= grid.width and nj >= 1 and nj <= grid.height then
+            if grid:isInside(ni, nj) then
                 local prevClaimed = isClaimed(grid, self.i, self.j)
                 local nextClaimed = isClaimed(grid, ni, nj)
                 local nextTrail = isTrail(grid, ni, nj)
@@ -69,14 +69,14 @@ function Player:draw(grid)
     if self.isDrawing and #self.trail > 0 then
         love.graphics.setColor(1, 0.8, 0.2)
         for _, cell in ipairs(self.trail) do
-            local x = (cell.i-1)*grid.cellSize
-            local y = (cell.j-1)*grid.cellSize
+            local x = grid.offsetX + (cell.i-1)*grid.cellSize
+            local y = grid.offsetY + (cell.j-1)*grid.cellSize
             love.graphics.rectangle('fill', x, y, grid.cellSize-1, grid.cellSize-1, 6, 6)
         end
     end
     -- Draw player
-    local x = (self.i-0.5)*grid.cellSize
-    local y = (self.j-0.5)*grid.cellSize
+    local x = grid.offsetX + (self.i-0.5)*grid.cellSize
+    local y = grid.offsetY + (self.j-0.5)*grid.cellSize
     love.graphics.setColor(0.2,0.6,1)
     love.graphics.circle('fill', x, y, grid.cellSize*0.35)
     love.graphics.setColor(1,1,1)
