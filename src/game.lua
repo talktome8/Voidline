@@ -19,12 +19,17 @@ local startTime = 0
 local elapsedTime = 0
 local autoRestartTimer = 0
 local autoRestartDelay = 2
+local score = 0 -- Initialize score
 local characters = require('src.characters.init')
 local unlockedCharacters = {1, 2, 3, 4, 5, 6} -- כל הדמויות פתוחות לדמו
-local currentCharacterIdx = 1
+local currentCharacterIdx = 1 -- Will be superseded by selectedCharacter object
 local realms = {VoidHatchery, EchoLab}
-local currentRealmIdx = 1
-local currentRealm = realms[currentRealmIdx]
+local currentRealmIdx = 1 -- Will be superseded by selectedRealm object
+local currentRealm = realms[currentRealmIdx] -- Initial default
+
+-- New variables to store player's explicit choices
+local selectedCharacter = nil
+local selectedRealm = nil
 
 function Game:load()
     local ww, wh = love.graphics.getWidth(), love.graphics.getHeight()
@@ -37,13 +42,14 @@ function Game:load()
     Grid.height = math.floor((wh - 2*margin) / cellSize)
     Grid:setSizeToWindow(ww, wh, margin)
     Grid:load()
-    -- Alternate character each level for demo
+    -- Alternate character each level for demo -- This logic will be changed
     -- פותח דמויות חדשות לפי שלבים
-    if level >= 3 and not unlockedCharacters[3] then
+    if level >= 3 and not unlockedCharacters[3] then -- This unlocking logic can remain
         self:unlockCharacter(3)
     end
-    local character = characters[unlockedCharacters[currentCharacterIdx] or 1]
-    Player:load(Grid, character)
+
+    local characterToLoad = selectedCharacter or characters[unlockedCharacters[1]] -- Use selected or default
+    Player:load(Grid, characterToLoad)
     enemies = {}
     -- שלבים מתקדמים: מוסיפים אויבים מגוונים
     table.insert(enemies, enemiesLib.Chaser:new(Grid.width-1, Grid.height-1))
@@ -56,11 +62,17 @@ function Game:load()
     Grid.enemies = enemies
     gameOver = false
     win = false
-    currentRealm = realms[((level-1) % #realms) + 1]
+    -- Use selectedRealm if available, otherwise cycle or default
+    currentRealm = selectedRealm or realms[((level-1) % #realms) + 1]
     Grid:setRequiredClaimedPercent(requiredPercents[level] or 0.8)
     startTime = love.timer.getTime()
     elapsedTime = 0
     autoRestartTimer = 0
+    score = 0 -- Reset score on new game/level
+end
+
+function Game:addScore(points)
+    score = score + points
 end
 
 function Game:update(dt)
@@ -105,27 +117,6 @@ function Game:update(dt)
     end
 end
 
--- Patch Player to notify realm on zone closure
-local origPlayerUpdate = Player.update
-function Player:update(dt, grid)
-    local beforeClaimed = grid:getClaimedPercent()
-    origPlayerUpdate(self, dt, grid)
-    local afterClaimed = grid:getClaimedPercent()
-    if afterClaimed > beforeClaimed then
-        if currentRealm and currentRealm.onZoneClosed then
-            currentRealm:onZoneClosed(grid)
-        end
-        -- Apply Architect's passive ability
-        if self.character and self.character.name == "Architect" then
-            for _, enemy in ipairs(enemies) do
-                if enemy.setFrozen then -- Check if the enemy has the setFrozen method
-                    enemy:setFrozen(1) -- Freeze for 1 second
-                end
-            end
-        end
-    end
-end
-
 function Game:draw()
     Grid:draw()
     Player:draw(Grid)
@@ -136,8 +127,8 @@ function Game:draw()
     local percent = math.floor(Grid:getClaimedPercent()*100)
     local req = math.floor(Grid.requiredClaimedPercent*100)
     local area = (Grid.width-2)*(Grid.height-2)
-    local character = characters[(currentCharacterIdx-1) % #characters + 1]
-    local panelW, panelH = 210, 90
+    local character = selectedCharacter or characters[unlockedCharacters[1]] -- Use selected or default for display
+    local panelW, panelH = 210, 110 -- Increased height for score
     local px, py = love.graphics.getWidth() - panelW - 10, 10
     love.graphics.setColor(0.95,0.95,0.95,0.7)
     love.graphics.rectangle('fill', px, py, panelW, panelH, 10, 10)
@@ -147,7 +138,8 @@ function Game:draw()
     love.graphics.print('Char: '..character.name, px+10, py+22)
     love.graphics.print('Claimed: '..percent..'/'..req..'%', px+10, py+38)
     love.graphics.print('Area: '..area, px+10, py+54)
-    love.graphics.print('D:'..deaths..' W:'..wins, px+10, py+70)
+    love.graphics.print('Score: '..score, px+10, py+70) -- Display score
+    love.graphics.print('D:'..deaths..' W:'..wins, px+10, py+86) -- Adjusted y-pos
     love.graphics.setFont(love.graphics.newFont(16))
     -- Realm info (bottom right, small font)
     love.graphics.setFont(love.graphics.newFont(11))
@@ -170,7 +162,7 @@ end
 function Game:keypressed(key)
     if win then
         level = level + 1
-        currentCharacterIdx = currentCharacterIdx % #characters + 1
+        -- currentCharacterIdx = currentCharacterIdx % #characters + 1 -- Removed auto-cycling
         self:load()
     elseif gameOver then
         self:load()
@@ -178,14 +170,46 @@ function Game:keypressed(key)
 end
 
 function Game:unlockCharacter(idx)
-    if not unlockedCharacters[idx] then
+    -- Check if the character (by index) is already conceptually unlocked
+    local alreadyUnlocked = false
+    for _, unlockedIdx in ipairs(unlockedCharacters) do
+        if unlockedIdx == idx then
+            alreadyUnlocked = true
+            break
+        end
+    end
+    if not alreadyUnlocked then
         table.insert(unlockedCharacters, idx)
+        -- Potentially provide feedback to the player here if desired
+        print("Unlocked character at index: " .. idx)
     end
 end
 
-function Game:selectCharacter(idx)
-    if unlockedCharacters[idx] then
-        currentCharacterIdx = idx
+-- Modified to accept character object
+function Game:selectCharacter(character_obj)
+    if character_obj then
+        selectedCharacter = character_obj
+        print("Character selected: " .. (character_obj.name or "Unknown"))
+        -- Find index for compatibility if needed elsewhere, though direct object usage is preferred
+        for i, char in ipairs(characters) do
+            if char == character_obj then
+                currentCharacterIdx = i -- Keep currentCharacterIdx for now if other logic relies on it
+                break
+            end
+        end
+    else
+        print("Error: Attempted to select a nil character.")
+    end
+end
+
+-- New function to accept realm object
+function Game:selectRealm(realm_obj)
+    if realm_obj then
+        selectedRealm = realm_obj
+        currentRealm = realm_obj -- Immediately set currentRealm as well
+        print("Realm selected: " .. (realm_obj.name or "Unknown"))
+    else
+        print("Error: Attempted to select a nil realm.")
     end
 end
 

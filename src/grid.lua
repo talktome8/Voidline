@@ -71,6 +71,12 @@ function Grid:draw()
 end
 
 function Grid:closeArea(trail)
+    local newlyClaimedCellCount = 0 -- Initialize counter
+
+    if not trail or #trail == 0 then 
+        return 0  -- Ensure 0 is returned if trail is nil or empty
+    end
+
     -- Always perform classic Qix/Xonix closure, regardless of realm
     local function isTrailOrthogonal(trail_to_check)
         if not trail_to_check or #trail_to_check < 1 then return true end
@@ -106,7 +112,7 @@ function Grid:closeArea(trail)
                 self.cells[cell_data.i][cell_data.j] = 'empty'
             end
         end
-        return
+        return 0 -- Ensure 0 is returned
     end
     if not isTrailProperlyClosed(trail, self) then
         for _, cell_data in ipairs(trail) do
@@ -114,12 +120,13 @@ function Grid:closeArea(trail)
                 self.cells[cell_data.i][cell_data.j] = 'empty'
             end
         end
-        return
+        return 0 -- Ensure 0 is returned
     end
     -- Mark trail as claimed for area detection
     for _, cell_data in ipairs(trail) do
-        if self:isInside(cell_data.i, cell_data.j) then
+        if self:isInside(cell_data.i, cell_data.j) and self.cells[cell_data.i][cell_data.j] ~= 'claimed' then
             self.cells[cell_data.i][cell_data.j] = 'claimed'
+            newlyClaimedCellCount = newlyClaimedCellCount + 1
         end
     end
     -- Flood fill: mark all cells connected to the border as 'outside'
@@ -187,8 +194,9 @@ function Grid:closeArea(trail)
     for lbl, cells in pairs(labelToCells) do
         if not labelHasEnemy[lbl] then
             for _, cell in ipairs(cells) do
-                if self.cells[cell.i] and self.cells[cell.i][cell.j] then
+                if self.cells[cell.i] and self.cells[cell.i][cell.j] and self.cells[cell.i][cell.j] ~= 'claimed' then
                     self.cells[cell.i][cell.j] = 'claimed'
+                    newlyClaimedCellCount = newlyClaimedCellCount + 1
                 end
             end
         end
@@ -202,10 +210,19 @@ function Grid:closeArea(trail)
         self.cells[1][j] = 'claimed'
         self.cells[self.width][j] = 'claimed'
     end
-    -- Always clean up trail
+    -- Always clean up trail (ensure they are marked claimed, count already handled)
     for _, cell_data in ipairs(trail) do
-        self.cells[cell_data.i][cell_data.j] = 'claimed'
+        if self:isInside(cell_data.i, cell_data.j) and self.cells[cell_data.i][cell_data.j] ~= 'claimed' then
+            -- This case should ideally not happen if trail marking above was comprehensive
+            -- but as a safeguard:
+            self.cells[cell_data.i][cell_data.j] = 'claimed'
+            newlyClaimedCellCount = newlyClaimedCellCount + 1
+        elseif self:isInside(cell_data.i, cell_data.j) and self.cells[cell_data.i][cell_data.j] == 'trail' then
+             -- If it was still 'trail', ensure it's 'claimed'. Counted when first turned to 'claimed'.
+            self.cells[cell_data.i][cell_data.j] = 'claimed'
+        end
     end
+    return newlyClaimedCellCount -- Return the count
 end
 
 -- Set required percent for win (per level)
@@ -234,7 +251,22 @@ function Grid:getClaimedPercent()
             end
         end
     end
+    if total == 0 then return 0 end -- Avoid division by zero
     return claimed / total
+end
+
+function Grid:addBonusClaimedCells(bonusCells)
+    if not bonusCells or #bonusCells == 0 then
+        return 0
+    end
+    local actuallyClaimedCount = 0
+    for _, cell in ipairs(bonusCells) do
+        if self:isInside(cell.i, cell.j) and self.cells[cell.i][cell.j] ~= 'claimed' then
+            self.cells[cell.i][cell.j] = 'claimed'
+            actuallyClaimedCount = actuallyClaimedCount + 1
+        end
+    end
+    return actuallyClaimedCount
 end
 
 return Grid
