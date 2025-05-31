@@ -36,7 +36,22 @@ function Grid:load()
 end
 
 function Grid:update(dt)
-    -- Future: Update enemies, trail, etc.
+    -- Echo Lab support: after zone closure, briefly revert claimed cells to empty, then re-claim
+    if self._echoLabTimer and self._echoLabTimer > 0 then
+        self._echoLabTimer = self._echoLabTimer - dt
+        if self._echoLabTimer <= 0 and self._echoLabToClaim then
+            for _, cell in ipairs(self._echoLabToClaim) do
+                self.cells[cell.i][cell.j] = 'claimed'
+            end
+            self._echoLabToClaim = nil
+        end
+    end
+
+    -- אפקט jammedTrail: אם הופעל, לא מציגים את ה-trail
+    if self._jammedTrail and self._jammedTrail > 0 then
+        self._jammedTrail = self._jammedTrail - dt
+        if self._jammedTrail < 0 then self._jammedTrail = nil end
+    end
 end
 
 function Grid:draw()
@@ -56,49 +71,140 @@ function Grid:draw()
 end
 
 function Grid:closeArea(trail)
-    -- Mark all trail cells as claimed first
-    for _, cell in ipairs(trail) do
-        self.cells[cell.i][cell.j] = 'claimed'
+    -- Always perform classic Qix/Xonix closure, regardless of realm
+    local function isTrailOrthogonal(trail_to_check)
+        if not trail_to_check or #trail_to_check < 1 then return true end
+        if #trail_to_check == 1 then return true end
+        for idx = 2, #trail_to_check do
+            local prev = trail_to_check[idx-1]
+            local curr = trail_to_check[idx]
+            local dx = math.abs(curr.i - prev.i)
+            local dy = math.abs(curr.j - prev.j)
+            if dx + dy ~= 1 then
+                return false
+            end
+        end
+        return true
     end
-    -- Flood fill to find all cells to claim
-    local mask = {}
-    for i=1,self.width do
-        mask[i] = {}
-        for j=1,self.height do
-            mask[i][j] = false
+    local function isTrailProperlyClosed(trail_to_check, self_grid)
+        if not trail_to_check or #trail_to_check == 0 then return false end
+        local head = trail_to_check[#trail_to_check]
+        if self_grid:isClaimed(head.i, head.j) then return true end
+        local dirs_check = {{1,0},{-1,0},{0,1},{0,-1}}
+        for _, d in ipairs(dirs_check) do
+            local ni, nj = head.i + d[1], head.j + d[2]
+            if self_grid:isClaimed(ni, nj) then
+                return true
+            end
+        end
+        return false
+    end
+    if not trail or #trail == 0 then return end
+    if not isTrailOrthogonal(trail) then
+        for _, cell_data in ipairs(trail) do
+            if self.cells[cell_data.i][cell_data.j] == 'trail' then
+                self.cells[cell_data.i][cell_data.j] = 'empty'
+            end
+        end
+        return
+    end
+    if not isTrailProperlyClosed(trail, self) then
+        for _, cell_data in ipairs(trail) do
+            if self.cells[cell_data.i][cell_data.j] == 'trail' then
+                self.cells[cell_data.i][cell_data.j] = 'empty'
+            end
+        end
+        return
+    end
+    -- Mark trail as claimed for area detection
+    for _, cell_data in ipairs(trail) do
+        if self:isInside(cell_data.i, cell_data.j) then
+            self.cells[cell_data.i][cell_data.j] = 'claimed'
         end
     end
-    for _, cell in ipairs(trail) do
-        mask[cell.i][cell.j] = true
-    end
+    -- Flood fill: mark all cells connected to the border as 'outside'
+    local visited = {}
+    for i=1,self.width do visited[i] = {} for j=1,self.height do visited[i][j] = false end end
     local queue = {}
-    for i=1,self.width do
-        for j=1,self.height do
-            if (i==1 or i==self.width or j==1 or j==self.height) and not mask[i][j] then
+    for i = 1, self.width do
+        for j = 1, self.height do
+            if self.cells[i][j] ~= 'claimed' and (i == 1 or i == self.width or j == 1 or j == self.height) then
                 table.insert(queue, {i=i, j=j})
-                mask[i][j] = true
+                visited[i][j] = true
             end
         end
     end
     local dirs = {{1,0},{-1,0},{0,1},{0,-1}}
-    while #queue > 0 do
-        local cell = table.remove(queue, 1)
+    local head_idx = 1
+    while head_idx <= #queue do
+        local current_cell = queue[head_idx]
+        head_idx = head_idx + 1
         for _, d in ipairs(dirs) do
-            local ni, nj = cell.i + d[1], cell.j + d[2]
-            if ni>=1 and ni<=self.width and nj>=1 and nj<=self.height then
-                if not mask[ni][nj] and self.cells[ni][nj] ~= 'trail' then
-                    mask[ni][nj] = true
-                    table.insert(queue, {i=ni, j=nj})
+            local ni, nj = current_cell.i + d[1], current_cell.j + d[2]
+            if self:isInside(ni, nj) and not visited[ni][nj] and self.cells[ni][nj] ~= 'claimed' then
+                visited[ni][nj] = true
+                table.insert(queue, {i=ni, j=nj})
+            end
+        end
+    end
+    -- Find all closed regions (not visited, not claimed)
+    local regionLabels = {}
+    local label = 0
+    local labelToCells = {}
+    local labelHasEnemy = {}
+    local enemies = self.enemies or {}
+    for i = 2, self.width-1 do
+        for j = 2, self.height-1 do
+            if not visited[i][j] and self.cells[i][j] ~= 'claimed' and not regionLabels[i..','..j] then
+                label = label + 1
+                labelToCells[label] = {}
+                local queue2 = {{i=i, j=j}}
+                regionLabels[i..','..j] = label
+                local idx2 = 1
+                while idx2 <= #queue2 do
+                    local cell = queue2[idx2]
+                    idx2 = idx2 + 1
+                    table.insert(labelToCells[label], cell)
+                    for _, enemy in ipairs(enemies) do
+                        if enemy.i == cell.i and enemy.j == cell.j then
+                            labelHasEnemy[label] = true
+                        end
+                    end
+                    for _, d in ipairs(dirs) do
+                        local ni, nj = cell.i + d[1], cell.j + d[2]
+                        if ni >= 2 and ni <= self.width-1 and nj >= 2 and nj <= self.height-1 then
+                            if not visited[ni][nj] and self.cells[ni][nj] ~= 'claimed' and not regionLabels[ni..','..nj] then
+                                regionLabels[ni..','..nj] = label
+                                table.insert(queue2, {i=ni, j=nj})
+                            end
+                        end
+                    end
                 end
             end
         end
     end
-    for i=1,self.width do
-        for j=1,self.height do
-            if not mask[i][j] then
-                self.cells[i][j] = 'claimed'
+    -- Claim all closed regions with no enemy
+    for lbl, cells in pairs(labelToCells) do
+        if not labelHasEnemy[lbl] then
+            for _, cell in ipairs(cells) do
+                if self.cells[cell.i] and self.cells[cell.i][cell.j] then
+                    self.cells[cell.i][cell.j] = 'claimed'
+                end
             end
         end
+    end
+    -- Always ensure the border is claimed
+    for i = 1, self.width do
+        self.cells[i][1] = 'claimed'
+        self.cells[i][self.height] = 'claimed'
+    end
+    for j = 1, self.height do
+        self.cells[1][j] = 'claimed'
+        self.cells[self.width][j] = 'claimed'
+    end
+    -- Always clean up trail
+    for _, cell_data in ipairs(trail) do
+        self.cells[cell_data.i][cell_data.j] = 'claimed'
     end
 end
 

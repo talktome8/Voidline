@@ -23,6 +23,7 @@ function Chaser:update(dt, grid, player)
         moveJ = (dj > 0) and 1 or -1
     end
     local ni, nj = self.i + moveI, self.j + moveJ
+    -- Prevent enemy from entering claimed (closed) zones
     if grid:isInside(ni, nj) and not grid:isClaimed(ni, nj) then
         self.i, self.j = ni, nj
     end
