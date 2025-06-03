@@ -8,10 +8,12 @@ function EnemyBase:new(i, j)
     e.type = 'base'
     e.color = {0.8, 0.2, 0.2} -- Default enemy color
     e.speed = 1 -- cells per second
+    e.moveDelay = 1.2 -- Default moveDelay for all enemies
     e.moveTimer = 0
     e.isStunned = false
     e.stunTimer = 0
     e.originalColor = nil
+    e.speedBoost = nil -- Initialize speedBoost
     return e
 end
 
@@ -28,7 +30,27 @@ function EnemyBase:load(grid)
     -- Override in child
 end
 
+function EnemyBase:hitByFuse()
+    -- Visual feedback: flash white, then return to normal
+    self._fuseHitTimer = 0.4
+    self._fuseHitColor = {1, 1, 1, 1}
+end
+
 function EnemyBase:update(dt, grid, player)
+    local actualSpeed = self.speed or 1
+    if self.speedBoost then
+        actualSpeed = actualSpeed * self.speedBoost
+    end
+    self.moveTimer = (self.moveTimer or 0) - dt * actualSpeed
+
+    -- Fuse hit visual effect
+    if self._fuseHitTimer and self._fuseHitTimer > 0 then
+        self._fuseHitTimer = self._fuseHitTimer - dt
+        if self._fuseHitTimer <= 0 then
+            self._fuseHitColor = nil
+        end
+    end
+
     if self.isStunned then
         self.stunTimer = self.stunTimer - dt
         if self.stunTimer <= 0 then
@@ -49,7 +71,11 @@ function EnemyBase:update(dt, grid, player)
 end
 
 function EnemyBase:draw(grid)
-    love.graphics.setColor(self.color)
+    if self._fuseHitColor then
+        love.graphics.setColor(self._fuseHitColor)
+    else
+        love.graphics.setColor(self.color)
+    end
     local x = grid.offsetX + (self.i-0.5)*grid.cellSize
     local y = grid.offsetY + (self.j-0.5)*grid.cellSize
     love.graphics.circle('fill', x, y, grid.cellSize*0.3)

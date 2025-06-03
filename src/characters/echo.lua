@@ -7,8 +7,8 @@ Echo.trailColor = {0.9, 0.7, 1}
 Echo.speed = 2.2
 Echo.trailLength = 18
 Echo.passives = {
-    "Trail pulses outward to stun enemies",
-    "Medium speed, balanced stats"
+    "Passive: Trail pulses outward to stun enemies.",
+    "Medium speed, balanced stats."
 }
 
 return Echo

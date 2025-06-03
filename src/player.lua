@@ -1,25 +1,80 @@
+local love = require "love" -- Added missing love require
 local Player = {}
 local Gamestate = require 'hump.gamestate' -- For accessing game state
 
+local function getCharacterByName(name)
+    local characters = require('src.characters.init')
+    for _, char in ipairs(characters) do
+        if char.name == name then return char end
+    end
+    return characters[1] -- fallback to first
+end
+
 function Player:load(grid, character)
-    self.i = math.floor(grid.width/2)
-    self.j = math.floor(grid.height/2)
-    self.character = character or require('src.characters.architect')
+    print('DEBUG: Player:load called with character:', character and character.name or 'NIL', tostring(character))
+    if character then
+        for k,v in pairs(character) do print('DEBUG: Player:load character['..tostring(k)..']='..tostring(v)) end
+    end
+    -- Player position is now node-based. Nodes are 1 to grid.nodeWidth and 1 to grid.nodeHeight
+    self.i = 1 -- Start on the first column of nodes (left border)
+    self.j = math.floor(grid.nodeHeight / 2) -- Start at a middle node vertically
+
+    -- Always use the selectedCharacter from Game if not explicitly passed
+    if not character then
+        if _G.selectedCharacter then
+            character = getCharacterByName(_G.selectedCharacter.name)
+            print('DEBUG: Player:load fallback to _G.selectedCharacter:', character.name, tostring(character))
+        else
+            character = getCharacterByName("Architect")
+            print('DEBUG: Player:load fallback to Architect (default)', tostring(character))
+        end
+    else
+        character = getCharacterByName(character.name)
+        print('DEBUG: Player:load normalized to canonical object:', character.name, tostring(character))
+    end
+    self.character = character
+    print('DEBUG: Player.character set to:', self.character and self.character.name or 'NIL', tostring(self.character))
     self.moveDelay = 0.15 / (self.character.speed or 2.0) 
-    self.moveTimer = 0
+    self.moveTimer = 0 -- Ensure moveTimer is initialized
     self.dir = {x=0, y=0}
-    self.trail = {}
+    self.trail = {} -- Trail is a list of node coordinates: { {i=node_i, j=node_j}, ... }
     self.isDrawing = false
+    self.trailForDrawingLastClosure = nil -- ADDED: To hold trail for drawing after closure
+    self.attemptingClosure = false -- ADDED: Flag for when closure is attempted this frame
+
     self.color = self.character.color or {0.2, 0.6, 1}
     self.trailColor = self.character.trailColor or {1, 0.8, 0.2}
     
     -- Character-specific initializations
     if self.character.name == "Trickster" then
-        self.tricksterSwapTimer = 10 -- seconds
+        self.tricksterSwapTimer = 10 -- seconds (this is the passive swap)
+        self.tricksterDecoyActive = false
+        self.tricksterDecoyTimer = 0 -- Duration of active decoy
+        self.tricksterDecoyCooldownTimer = 0 -- Cooldown for the ability
+        self.tricksterDecoyPosition = nil -- {i, j} for the decoy
+        self.originalSpeed = self.character.speed -- Store original speed
     end
     if self.character.name == "Architect" then
         self.architectTrailPersistTimer = 0
         self.architectLastTrailCells = {} -- To store the trail if player stops drawing
+    end
+
+    -- Fuse mechanic properties
+    self.isFuseActive = false
+    self.fuseTimer = 0
+    self.fuseDuration = (self.character.fuseDuration or 5)
+    self.fuseDefuseAvailable = (self.character.fuseDefuse or false)
+    self.fuseDefused = false
+    self.fuseShieldActive = false
+    self.fuseShieldCooldown = 0
+    self.fuseShieldDuration = 2
+    self.fuseShieldCooldownMax = 10
+
+    -- Trickster specific: set default values if missing
+    if self.character.name == "Trickster" then
+        if not self.character.decoySpeedMultiplier then self.character.decoySpeedMultiplier = 1.25 end
+        if not self.character.decoyDuration then self.character.decoyDuration = 2.5 end
+        if not self.character.decoyCooldown then self.character.decoyCooldown = 8 end
     end
 end
 
@@ -32,7 +87,34 @@ local function isTrail(grid, i, j)
 end
 
 function Player:update(dt, grid)
-    local game = Gamestate.current() -- Access Game state for enemies, currentRealm etc.
+    if self.moveTimer == nil then -- Safeguard against nil moveTimer
+        print("Warning: Player.moveTimer was nil, re-initializing to 0.")
+        self.moveTimer = 0
+    end
+
+    -- ADDED: Clear attemptClose flag from previous frame
+    if self.attemptingClosure then
+        self.attemptingClosure = false
+    end
+
+    local game = Gamestate.current()
+
+    -- Trickster Decoy Cooldown Update
+    if self.character and self.character.name == "Trickster" then
+        if self.tricksterDecoyCooldownTimer > 0 then
+            self.tricksterDecoyCooldownTimer = self.tricksterDecoyCooldownTimer - dt
+        end
+        if self.tricksterDecoyActive then
+            self.tricksterDecoyTimer = self.tricksterDecoyTimer - dt
+            if self.tricksterDecoyTimer <= 0 then
+                self.tricksterDecoyActive = false
+                self.tricksterDecoyPosition = nil
+                self.character.speed = self.originalSpeed -- Restore speed
+                -- Invisibility is handled in draw, but reset state here if needed
+                print("Trickster decoy expired")
+            end
+        end
+    end
 
     -- Architect Trail Persistence Update
     if self.character and self.character.name == "Architect" and self.architectTrailPersistTimer > 0 then
@@ -49,6 +131,53 @@ function Player:update(dt, grid)
                 self.trail = {}
             end
             -- print("Architect trail expired")
+        end
+    end
+
+    -- Guardian: activate fuse shield (press F)
+    if self.character and self.character.name == "Guardian" then
+        if love.keyboard.isDown('f') and not self.fuseShieldActive and self.fuseShieldCooldown <= 0 then
+            self.fuseShieldActive = true
+            self.fuseShieldCooldown = self.fuseShieldCooldownMax
+            self.fuseShieldTimer = self.fuseShieldDuration
+        end
+        if self.fuseShieldActive then
+            self.fuseShieldTimer = self.fuseShieldTimer - dt
+            if self.fuseShieldTimer <= 0 then
+                self.fuseShieldActive = false
+            end
+        end
+        if self.fuseShieldCooldown > 0 then
+            self.fuseShieldCooldown = self.fuseShieldCooldown - dt
+        end
+    end
+
+    -- Fuse Mechanic Update
+    if self.isFuseActive then
+        -- Realm-specific fuse logic
+        local realm = grid.currentRealm or (grid.realm and grid.realm.name)
+        if self.fuseShieldActive then
+            -- Shield blocks fuse
+            self.isFuseActive = false
+            self.fuseTimer = 0
+        elseif realm == "Pulse Mines" then
+            self.fuseTimer = self.fuseTimer - dt*1.5 -- faster fuse
+        elseif realm == "Echo Lab" and #self.trail > 0 and #self.trail < 6 then
+            self.fuseTimer = self.fuseTimer + dt*0.5 -- closing small area resets fuse
+        elseif realm == "Void Hatchery" and grid.enemies then
+            local danger = 0
+            for _,e in ipairs(grid.enemies) do if e.name == "GuardianBreaker" then danger = danger + 1 end end
+            self.fuseTimer = self.fuseTimer - dt*(1+danger*0.5)
+        else
+            self.fuseTimer = self.fuseTimer - dt
+        end
+        if self.fuseTimer <= 0 then
+            self.isFuseActive = false
+            self.fuseTimer = 0
+            local game = require('src.game')
+            if game and game.gameOver ~= nil then
+                game.gameOver = true
+            end
         end
     end
 
@@ -74,14 +203,65 @@ function Player:update(dt, grid)
         end
     end
 
+    -- In Player:update, add jammed logic to disable abilities
+    if self.isJammed then
+        self.jamTimer = (self.jamTimer or 0) - dt
+        -- Block fuse shield and other actives
+        if self.jamTimer > 0 then
+            self.fuseShieldActive = false
+            -- Optionally block other actives here
+        else
+            self.isJammed = false
+            self.jamTimer = 0
+        end
+    end
+
+    -- Handle active ability (Trickster example)
+    if self.character and self.character.name == "Trickster" then
+        if not self.abilityCooldown then self.abilityCooldown = 0 end
+        if love.keyboard.isDown('space') and self.abilityCooldown <= 0 then
+            -- Swap with decoy (for demo, just print and reset cooldown)
+            print("Trickster used Decoy Swap!")
+            self.abilityCooldown = self.character.activeAbilityCooldown or 8
+        end
+        if self.abilityCooldown and self.abilityCooldown > 0 then
+            self.abilityCooldown = math.max(0, self.abilityCooldown - dt)
+        end
+    end
+
     self.moveTimer = self.moveTimer - dt
     if self.moveTimer <= 0 then
-        local dx, dy = 0, 0
+        -- Determine input direction
+        local input_dx, input_dy = 0, 0
+        if love.keyboard.isDown('left') then input_dx = -1 end
+        if love.keyboard.isDown('right') then input_dx = 1 end -- Changed elseif to if
+        if love.keyboard.isDown('up') then input_dy = -1 end
+        if love.keyboard.isDown('down') then input_dy = 1 end -- Changed elseif to if
+
+        local dx_node, dy_node = 0, 0
         local moved = false
-        if love.keyboard.isDown('up') then dy = -1; moved = true end
-        if love.keyboard.isDown('down') then dy = 1; moved = true end
-        if love.keyboard.isDown('left') then dx = -1; moved = true end
-        if love.keyboard.isDown('right') then dx = 1; moved = true end
+
+        -- Allow diagonal movement
+        if input_dx ~= 0 or input_dy ~= 0 then
+            dx_node = input_dx
+            dy_node = input_dy
+            moved = true
+        end
+        -- Now, moved is true if there was any input.
+        -- dx_node and dy_node can both be non-zero for diagonal movement.
+
+        -- Trickster Decoy Activation
+        if self.character and self.character.name == "Trickster" and love.keyboard.isDown('space') then
+            if not self.tricksterDecoyActive and self.tricksterDecoyCooldownTimer <= 0 then
+                self.tricksterDecoyActive = true
+                self.tricksterDecoyTimer = self.character.decoyDuration
+                self.tricksterDecoyCooldownTimer = self.character.decoyCooldown
+                self.tricksterDecoyPosition = {i = self.i, j = self.j}
+                self.character.speed = self.originalSpeed * self.character.decoySpeedMultiplier -- Apply speed boost
+                self.moveDelay = 0.15 / self.character.speed -- Recalculate moveDelay with new speed
+                print("Trickster decoy activated!")
+            end
+        end
 
         if self.character and self.character.name == "Architect" and not moved and self.isDrawing and #self.trail > 0 then
             -- Architect stopped moving while drawing, activate trail persistence
@@ -95,177 +275,174 @@ function Player:update(dt, grid)
         end
 
         if moved then
-            if self.character and self.character.name == "Architect" and self.architectTrailPersistTimer > 0 and #self.architectLastTrailCells > 0 then
-                 -- Architect started moving again, if they are not drawing a *new* trail from a claimed zone,
-                 -- they might be intending to connect to the persistent one.
-                 -- For now, moving will cancel the *specific* persistence timer if they start a new line from claimed territory.
-                 -- If they move into an empty cell to extend, it should ideally connect to self.architectLastTrailCells.
-                 -- This part needs careful logic for reconnecting to a persisted trail.
-                 -- For a simpler first pass, if they start a *new* trail segment, the old persisted one continues its own timer.
+            local prev_node_i, prev_node_j = self.i, self.j
+            local next_node_i, next_node_j = self.i + dx_node, self.j + dy_node
+
+            -- DEBUG: Check grid object and its methods
+            print("Player:update - grid type:", type(grid))
+            if type(grid) == "table" then
+                print("Player:update - grid.isNodeValid type:", type(grid.isNodeValid))
+                print("Player:update - grid.isLineSafe type:", type(grid.isLineSafe))
             end
 
-            local ni, nj = self.i + dx, self.j + dy
-            if grid:isInside(ni, nj) then
-                local prevClaimedPercent = grid:getClaimedPercent()
-                local prevCellWasClaimed = isClaimed(grid, self.i, self.j)
-                local nextCellIsClaimed = isClaimed(grid, ni, nj)
-                local nextCellIsTrail = isTrail(grid, ni, nj)
+            if grid:isNodeValid(next_node_i, next_node_j) then
+                local lineIsSafe = grid:isLineSafe(prev_node_i, prev_node_j, next_node_i, next_node_j)
 
-                if not self.isDrawing and nextCellIsClaimed then
-                    self.i, self.j = ni, nj
-                    self.moveTimer = self.moveDelay
-                    return
-                end
-
-                if self.isDrawing and nextCellIsTrail then
-                     -- Check if it's part of Architect's own persisted trail
-                    if self.character and self.character.name == "Architect" and self.architectTrailPersistTimer > 0 then
-                        local isOwnPersistedTrail = false
-                        for _, pcell in ipairs(self.architectLastTrailCells) do
-                            if pcell.i == ni and pcell.j == nj then
-                                isOwnPersistedTrail = true; break
-                            end
-                        end
-                        if isOwnPersistedTrail then 
-                            -- Allow crossing to close if it's the persisted trail, effectively merging
-                            -- The current self.trail should be merged with self.architectLastTrailCells
-                            -- Then proceed to closure logic. This is complex. 
-                            -- For now, let's assume standard closure if it hits any trail cell.
-                        else return -- Collided with a different part of current trail or other trail
-                        end
-                    else
-                        return -- Collided with own trail (non-Architect or non-persisted)
-                    end
-                end
-                
-                self.i, self.j = ni, nj
-                self.moveTimer = self.moveDelay
-                self.architectTrailPersistTimer = 0 -- Actively moving/drawing new segment, stop specific persistence of previous segment
-                if #self.architectLastTrailCells > 0 and not nextCellIsClaimed then
-                    -- If architect had a persisted trail and is now drawing into empty space,
-                    -- assume they are extending/creating a new trail. The old one might still be there if its timer hasn't run out.
-                    -- To simplify, let's clear architectLastTrailCells if they start drawing a new segment from scratch.
-                    -- self.architectLastTrailCells = {}
-                end
-
-                if prevCellWasClaimed and not nextCellIsClaimed and not self.isDrawing then 
+                if not self.isDrawing and not lineIsSafe then
+                    -- Start drawing a new trail
                     self.isDrawing = true
-                    self.trail = {{i=self.i, j=self.j}} -- Start trail from new position
-                    grid.cells[self.i][self.j] = 'trail'
-                    self.architectLastTrailCells = {} -- Starting a new trail, clear any persisted one
-                elseif self.isDrawing and not nextCellIsClaimed then 
-                    table.insert(self.trail, {i=self.i, j=self.j})
-                    grid.cells[self.i][self.j] = 'trail'
-                elseif self.isDrawing and nextCellIsClaimed then 
+                    self.trail = { {i=prev_node_i, j=prev_node_j}, {i=next_node_i, j=next_node_j} }
+                    -- No direct grid cell marking for trail yet with node system
+                    print("Player started drawing trail from node ("..prev_node_i..","..prev_node_j..") to ("..next_node_i..","..next_node_j..")")
+                elseif self.isDrawing and not lineIsSafe then
+                    -- Continue drawing
+                    table.insert(self.trail, {i=next_node_i, j=next_node_j})
+                    -- No direct grid cell marking
+                    print("Player continued trail to node ("..next_node_i..","..next_node_j..")")
+                elseif self.isDrawing and lineIsSafe then
+                    -- Reached a safe line, attempt to close area
                     self.isDrawing = false
-                    local closedTrail = shallowcopy(self.trail)
-                    print("Player:update - About to call grid:closeArea. Type of closedTrail: " .. type(closedTrail))
-                    if type(closedTrail) == "table" then
-                        print("Player:update - Length of closedTrail: " .. #closedTrail)
-                        for i, cell in ipairs(closedTrail) do
-                            print("Player:update - closedTrail cell " .. i .. ": i=" .. cell.i .. ", j=" .. cell.j)
-                        end
+                    self.attemptingClosure = true -- MODIFIED: Set flag for drawing this frame
+
+                    -- Make sure the last point is added to trail
+                    if #self.trail == 0 or not (self.trail[#self.trail].i == next_node_i and self.trail[#self.trail].j == next_node_j) then
+                        table.insert(self.trail, {i=next_node_i, j=next_node_j})
                     end
-                                        
-                    local newlyClaimedCellCount -- Declare here
-                    if #closedTrail > 0 then 
-                        for _, cell_coord in ipairs(closedTrail) do
-                            if grid.cells[cell_coord.i] and grid.cells[cell_coord.i][cell_coord.j] == 'trail' then
-                                grid.cells[cell_coord.i][cell_coord.j] = 'pending_claim'
-                            end
-                        end
-                        
-                        newlyClaimedCellCount = grid:closeArea(closedTrail) -- Assign here
-                        print("Player:update - Returned from grid:closeArea. Type of newlyClaimedCellCount: " .. type(newlyClaimedCellCount) .. ", Value: " .. tostring(newlyClaimedCellCount))
-                        
-                        for _, cell_coord in ipairs(closedTrail) do
-                             if grid.cells[cell_coord.i] and grid.cells[cell_coord.i][cell_coord.j] == 'pending_claim' then
-                                grid.cells[cell_coord.i][cell_coord.j] = 'claimed'
-                             end
-                        end
+                    print("Player attempting to close trail at node ("..next_node_i..","..next_node_j.."). Trail length: " .. #self.trail)
+
+                    -- Save full trail for closure and drawing
+                    self.trailForDrawingLastClosure = shallowcopy(self.trail)
+
+                    if #self.trail >= 3 then -- Ensure trail is long enough to form an area
+                        local newlyClaimedCellCount = grid:closeAreaByNodes(self.trail, self)
+                        print("Grid:closeAreaByNodes claimed " .. newlyClaimedCellCount .. " cells.")
+                        -- TODO: Add scoring or other logic based on newlyClaimedCellCount
                     else
-                        newlyClaimedCellCount = 0
-                        print("Player:update - closedTrail was empty, newlyClaimedCellCount set to 0")
+                        print("Trail too short to close, clearing trail.")
                     end
-                    self.trail = {}
-                    self.architectLastTrailCells = {} -- Trail closed, clear persisted one
-                    self.architectTrailPersistTimer = 0
-
-                    local afterClaimedPercent = grid:getClaimedPercent()
-                    if afterClaimedPercent > prevClaimedPercent or newlyClaimedCellCount > 0 then
-                        if game and game.currentRealm and game.currentRealm.onZoneClosed then
-                            game.currentRealm:onZoneClosed(grid)
-                        end
-                        
-                        if self.character and self.character.name == "Architect" then
-                            -- Architect: Loop Closure Bonus
-                            if self.character.loopClosureBonusPercent and newlyClaimedCellCount > 0 then
-                                -- Calculate bonus cells based on the *newly claimed area*, not total grid area
-                                local bonusCellsCount = math.floor(newlyClaimedCellCount * self.character.loopClosureBonusPercent)
-                                if bonusCellsCount > 0 then
-                                    -- The addBonusClaimedCells function needs to be smarter or we simplify the concept.
-                                    -- For now, let's assume it adds a flat number of cells, or we can award score directly.
-                                    -- Let's award score for now, as adding specific cells is complex without more grid logic.
-                                    local loopBonusScore = bonusCellsCount * 10 -- Example: 10 points per bonus cell equivalent
-                                    if game and game.addScore then
-                                        game:addScore(loopBonusScore)
-                                    end
-                                    print("Architect Loop Closure Bonus: Score +" .. loopBonusScore .. " (equiv. " .. bonusCellsCount .. " cells)")
-                                end
-                            end
-
-                            -- Architect: Large Zone Bonus (Score)
-                            if self.character.largeZoneBonusMultiplier and newlyClaimedCellCount >= self.character.largeZoneThreshold then
-                                local baseScoreForClosure = newlyClaimedCellCount * 10 -- Example: 10 points per cell claimed
-                                local largeZoneBonusScore = baseScoreForClosure * (self.character.largeZoneBonusMultiplier - 1) -- Calculate only the bonus part
-                                if game and game.addScore then
-                                    game:addScore(largeZoneBonusScore) -- Add the bonus amount
-                                    -- The base score for closure should be handled separately if not already.
-                                    -- For simplicity, let's assume newlyClaimedCellCount itself contributes to a base score elsewhere or here.
-                                    -- Let's add the base score here as well for now.
-                                    game:addScore(baseScoreForClosure)
-                                end
-                                print("Architect Large Zone Bonus Applied! Total from this closure: " .. (baseScoreForClosure + largeZoneBonusScore) .. " (Base: " .. baseScoreForClosure .. ", Bonus: " .. largeZoneBonusScore .. ")")
-                            elseif newlyClaimedCellCount > 0 then -- Grant base score for any closure
-                                local baseScoreForClosure = newlyClaimedCellCount * 10 -- Example: 10 points per cell claimed
-                                if game and game.addScore then
-                                    game:addScore(baseScoreForClosure)
-                                end
-                                print("Closure score: " .. baseScoreForClosure)
-                            end
-
-                            -- Architect: Freeze Enemies
-                            if game and game.enemies and self.character.freezeDuration then 
-                                for _, enemy in ipairs(game.enemies) do
-                                    if enemy.setFrozen then 
-                                        enemy:setFrozen(self.character.freezeDuration)
-                                    end
-                                end
-                                print("Architect Passive: Enemies Frozen for " .. self.character.freezeDuration .. "s")
-                            end
-                        end
-                    end
+                    self.trail = {} -- Clear main trail, drawing will use the copy
+                elseif not self.isDrawing and lineIsSafe then
+                    -- Moving along a safe line, not drawing
+                    self.trail = {} -- Ensure trail is clear
                 end
+
+                self.i, self.j = next_node_i, next_node_j
+                self.moveTimer = self.moveDelay
+                
+                -- ... (Architect trail persistence logic might need adjustment here too) ...
             end
         end
     end
 end
 
 function Player:draw(grid)
-    -- Draw trail
-    if not grid._jammedTrail and self.isDrawing and #self.trail > 0 then
-        love.graphics.setColor(self.trailColor)
-        for _, cell in ipairs(self.trail) do
-            local x = grid.offsetX + (cell.i-1)*grid.cellSize
-            local y = grid.offsetY + (cell.j-1)*grid.cellSize
-            love.graphics.rectangle('fill', x, y, grid.cellSize-1, grid.cellSize-1, 6, 6)
-        end
+    local trailToDrawThisFrame = nil
+    if self.isDrawing and #self.trail >= 2 then
+        trailToDrawThisFrame = self.trail
+    elseif self.trailForDrawingLastClosure and #self.trailForDrawingLastClosure >= 2 then
+        trailToDrawThisFrame = self.trailForDrawingLastClosure
     end
-    -- Draw player
-    local x = grid.offsetX + (self.i-0.5)*grid.cellSize
-    local y = grid.offsetY + (self.j-0.5)*grid.cellSize
+    if trailToDrawThisFrame then
+        love.graphics.setColor(self.trailColor)
+        love.graphics.setLineWidth(3)
+        for k = 1, #trailToDrawThisFrame - 1 do
+            local p1_node = trailToDrawThisFrame[k]
+            local p2_node = trailToDrawThisFrame[k+1]
+            local x1, y1 = grid:getNodePixelPosition(p1_node.i, p1_node.j)
+            local x2, y2 = grid:getNodePixelPosition(p2_node.i, p2_node.j)
+            love.graphics.line(x1, y1, x2, y2)
+        end
+        love.graphics.setLineWidth(1)
+    end
+    if self.trailForDrawingLastClosure then self.trailForDrawingLastClosure = nil end
+
+    -- Draw Trickster's Decoy (משולש)
+    if self.character and self.character.name == "Trickster" and self.tricksterDecoyActive and self.tricksterDecoyPosition then
+        local decoyColor = {self.color[1], self.color[2], self.color[3], 0.5}
+        love.graphics.setColor(decoyColor)
+        local x = grid.offsetX + (self.tricksterDecoyPosition.i-0.5)*grid.cellSize
+        local y = grid.offsetY + (self.tricksterDecoyPosition.j-0.5)*grid.cellSize
+        love.graphics.polygon('fill', x, y-18, x+16, y+14, x-16, y+14)
+    end
+
+    -- Draw player (unique shape per character, תמיד!)
+    local px, py = grid:getNodePixelPosition(self.i, self.j)
     love.graphics.setColor(self.color)
-    love.graphics.circle('fill', x, y, grid.cellSize*0.35)
+    local cs = grid.cellSize
+    if self.character and self.character.name then
+        -- DEBUG: Drawing character
+        -- Outline
+        love.graphics.setLineWidth(3)
+        if self.character.name == "Architect" then
+            -- Architect: blue rounded square with white border
+            love.graphics.setColor(1,1,1,0.9)
+            love.graphics.rectangle('line', px-cs*0.22, py-cs*0.22, cs*0.44, cs*0.44, 10, 10)
+            love.graphics.setColor(0.1,0.5,1,0.7)
+            love.graphics.rectangle('line', px-cs*0.20, py-cs*0.20, cs*0.40, cs*0.40, 8, 8)
+            love.graphics.setColor(self.color)
+            love.graphics.rectangle('fill', px-cs*0.18, py-cs*0.18, cs*0.36, cs*0.36, 6, 6)
+        elseif self.character.name == "Trickster" then
+            -- Trickster: orange triangle with glow
+            love.graphics.setColor(1,0.7,0.2,0.7)
+            love.graphics.polygon('line', px, py-cs*0.24, px+cs*0.20, py+cs*0.18, px-cs*0.20, py+cs*0.18)
+            love.graphics.setColor(1,0.5,0.1,0.25)
+            love.graphics.circle('fill', px, py, cs*0.23)
+            love.graphics.setColor(self.color)
+            love.graphics.polygon('fill', px, py-cs*0.22, px+cs*0.18, py+cs*0.16, px-cs*0.18, py+cs*0.16)
+        elseif self.character.name == "Echo" or self.character.name == "The Echo" then
+            -- Echo: purple circle with white highlight
+            love.graphics.setColor(1,1,1,0.7)
+            love.graphics.circle('line', px, py, cs*0.22)
+            love.graphics.setColor(0.7,0.5,1,0.7)
+            love.graphics.circle('line', px, py, cs*0.20)
+            love.graphics.setColor(self.color)
+            love.graphics.circle('fill', px, py, cs*0.18)
+        elseif self.character.name == "Sprinter" then
+            -- Sprinter: orange ellipse with speed lines
+            love.graphics.setColor(1,0.5,0.2,0.7)
+            love.graphics.ellipse('line', px, py, cs*0.22, cs*0.14)
+            love.graphics.setColor(self.color)
+            love.graphics.ellipse('fill', px, py, cs*0.20, cs*0.12)
+            love.graphics.setColor(1,0.7,0.2,0.5)
+            love.graphics.line(px-cs*0.28, py, px-cs*0.12, py)
+            love.graphics.line(px+cs*0.12, py, px+cs*0.28, py)
+        elseif self.character.name == "Guardian" then
+            -- Guardian: blue double square with shield glow
+            love.graphics.setColor(0.2,0.7,1,0.7)
+            love.graphics.rectangle('line', px-cs*0.22, py-cs*0.22, cs*0.44, cs*0.44, 10, 10)
+            love.graphics.setColor(self.color)
+            love.graphics.setLineWidth(4)
+            love.graphics.rectangle('line', px-cs*0.18, py-cs*0.18, cs*0.36, cs*0.36, 6, 6)
+            love.graphics.setLineWidth(1)
+            love.graphics.rectangle('fill', px-cs*0.13, py-cs*0.13, cs*0.26, cs*0.26, 6, 6)
+            love.graphics.setColor(0.2,0.7,1,0.18)
+            love.graphics.circle('fill', px, py, cs*0.30)
+        elseif self.character.name == "Scorer" then
+            -- Scorer: yellow star with white outline
+            local function star(cx, cy, r, n)
+                local points = {}
+                for i=1, n*2 do
+                    local angle = (i-1)*math.pi/n
+                    local rad = (i%2==1) and r or r*0.45
+                    table.insert(points, cx + math.cos(angle)*rad)
+                    table.insert(points, cy + math.sin(angle)*rad)
+                end
+                love.graphics.setColor(1,1,1,0.8)
+                love.graphics.polygon('line', points)
+                love.graphics.setColor(1,1,0.3,0.7)
+                love.graphics.polygon('line', points)
+                love.graphics.setColor(self.color)
+                love.graphics.polygon('fill', points)
+            end
+            star(px, py, cs*0.19, 5)
+        end
+        love.graphics.setLineWidth(1)
+    else
+        love.graphics.setColor(0.8,0.8,0.8,0.7)
+        love.graphics.circle('line', px, py, cs*0.27)
+        love.graphics.setColor(self.color)
+        love.graphics.circle('fill', px, py, cs*0.25)
+    end
     love.graphics.setColor(1,1,1)
 
     -- Draw Architect's persisted trail if any
@@ -279,6 +456,51 @@ function Player:draw(grid)
             end
         end
         love.graphics.setColor(1,1,1) -- Reset color
+    end
+
+    -- Draw fuse shield for Guardian
+    if self.fuseShieldActive then
+        local px, py = grid:getNodePixelPosition(self.i, self.j)
+        love.graphics.setColor(0.2, 0.8, 1, 0.5)
+        love.graphics.circle('line', px, py, grid.cellSize * 0.45, 32)
+        love.graphics.setColor(1,1,1)
+    end
+
+    -- Draw jammed effect on player
+    if self.isJammed and (self.jamTimer or 0) > 0 then
+        local px, py = grid:getNodePixelPosition(self.i, self.j)
+        love.graphics.setColor(0.7, 0.3, 0.9, 0.5)
+        love.graphics.circle('line', px, py, grid.cellSize * 0.5, 32)
+        love.graphics.setColor(1,1,1)
+    end
+
+    -- Draw fuse visuals (color changes as fuse timer decreases)
+    if self.isFuseActive and self.burningTrail and #self.burningTrail >= 2 then
+        local burnProgress = 1 - (self.fuseTimer / self.fuseDuration)
+        if burnProgress < 0 then burnProgress = 0 end
+        if burnProgress > 1 then burnProgress = 1 end
+        local fuseColor = {1, 0.3 + 0.7*burnProgress, 0.1*(1-burnProgress), 0.7}
+        love.graphics.setLineWidth(5)
+        love.graphics.setColor(fuseColor)
+        -- Draw a glowing circle around the player as a fuse indicator
+        local px, py = grid:getNodePixelPosition(self.i, self.j)
+        local fuseGlow = 0.25 + 0.15*math.abs(math.sin(love.timer.getTime()*8))
+        love.graphics.setColor(1, 0.5, 0.1, 0.25 + 0.25*fuseGlow)
+        love.graphics.circle('fill', px, py, grid.cellSize * (0.35 + 0.18*fuseGlow))
+        love.graphics.setColor(1, 0.3, 0.1, 0.7)
+        love.graphics.setLineWidth(5)
+        love.graphics.circle('line', px, py, grid.cellSize * 0.35, 32)
+        love.graphics.setLineWidth(1)
+        love.graphics.setColor(1,1,1)
+    end
+    -- Draw jammed icon above player
+    if self.isJammed and (self.jamTimer or 0) > 0 then
+        local px, py = grid:getNodePixelPosition(self.i, self.j)
+        love.graphics.setColor(0.7, 0.3, 0.9, 0.9)
+        love.graphics.circle('fill', px, py-grid.cellSize*0.6, grid.cellSize*0.18)
+        love.graphics.setColor(1,1,1)
+        love.graphics.setFont(love.graphics.newFont(14))
+        love.graphics.printf("JAM", px-grid.cellSize*0.18, py-grid.cellSize*0.65, grid.cellSize*0.36, 'center')
     end
 end
 
