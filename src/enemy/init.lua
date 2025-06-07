@@ -5,6 +5,10 @@ local Jammer = require 'src.enemy.jammer'
 local Base = require 'src.enemy.base'
 local GuardianBreaker = require 'src.enemy.guardian_breaker'
 local ReclaimerBoss = require('src.enemy.reclaimer_boss')
+local Infester = require('src.enemy.infester')
+local Phaser = require('src.enemy.phaser')
+local Splitter = require('src.enemy.splitter')
+local Teleporter = require('src.enemy.teleporter')
 
 return {
     Chaser = Chaser,
@@ -13,4 +17,8 @@ return {
     Base = Base,
     GuardianBreaker = GuardianBreaker,
     ReclaimerBoss = ReclaimerBoss,
+    Infester = Infester,
+    Phaser = Phaser,
+    Splitter = Splitter,
+    Teleporter = Teleporter,
 }

@@ -1,3 +1,6 @@
+-- src/game.lua
+-- Central game state machine and main game loop. Handles level flow, enemy/player/grid updates, and delegates UI overlays to the HUD module.
+
 local love = require "love"
 local Gamestate = require 'hump.gamestate' -- Added this line
 local Game = {}
@@ -12,6 +15,10 @@ local PulseMines = require 'src.realms.pulse_mines' -- Added PulseMines
 
 -- Require the EndRun state correctly
 local EndRun = require 'src.ui.endrun' 
+local IngameHUD = require 'src.ui.ingame_hud'
+local Achievements = require('src.ui.achievements')
+
+local Sound = require('src.utils.sound')
 
 -- enemies table
 local enemies = {} -- Enemy list for the current level
@@ -90,7 +97,8 @@ function Game:enter(...)
     self:load()
 end
 
-function Game:resume(poppedState, outcomeString)
+function Game:resume(poppedState, outcomeString, stagesArg)
+    local stages = stagesArg or require('src.stages.init')
     print("Game:resume called. Popped state type: " .. type(poppedState) .. ", Outcome string: " .. tostring(outcomeString) .. ", current level before increment: " .. level)
     if outcomeString == "win" then
         -- Check if a character should be unlocked after this boss level
@@ -110,26 +118,97 @@ function Game:resume(poppedState, outcomeString)
         end
         level = level + 1
         print("Game:resume - Level incremented to: ", level)
+        win = false
+        gameOver = false
+        self:load()
+        return
     elseif outcomeString == "gameOver" then
         print("Game:resume - Game Over. Reloading level: ", level)
+        Sound.play('death')
+        win = false
+        gameOver = false
+        self:load()
+        return
     end
-    self:load()
+    -- === Achievements logic ===
+    -- 1. Close 90% in a single run
+    if Grid and Grid.getClaimedPercent and Grid:getClaimedPercent() >= 0.9 then
+        Achievements:unlock("close90")
+    end
+    -- 2. Defeat boss (if current stage is boss)
+    local stageIdx = ((level-1) % #stages) + 1
+    local stage = stages[stageIdx]
+    if outcomeString == "win" and stage and stage.name and string.lower(stage.name):find("boss") then
+        Achievements:unlock("defeatBoss")
+        Sound.play('boss')
+    end
+    -- 3. Win with every character
+    if outcomeString == "win" and selectedCharacter and selectedCharacter.name then
+        Achievements.personal["win_"..selectedCharacter.name] = true
+        local allWon = true
+        for _, char in ipairs(characters) do
+            if not Achievements.personal["win_"..char.name] then allWon = false end
+        end
+        if allWon then Achievements:unlock("allChars") end
+    end
+    -- 4. Win a stage without dying
+    if outcomeString == "win" and deaths == 0 then
+        Achievements:unlock("noDeath")
+    end
+    -- === Endrun stats logic ===
+    local statsTable = {
+        level = level,
+        characterName = (selectedCharacter and selectedCharacter.name) ~= nil and (selectedCharacter and selectedCharacter.name)
+            or ((Player.character and Player.character.name) ~= nil and (Player.character and Player.character.name))
+            or (characters[unlockedCharacters[1]].name),
+        claimedPercent = math.floor(Grid:getClaimedPercent()*100),
+        requiredPercent = math.floor(Grid.requiredClaimedPercent*100),
+        areaCleared = (Grid.width-2)*(Grid.height-2),
+        score = score,
+        deaths = deaths,
+        wins = wins,
+        zonesClosed = zonesClosed or 0,
+        abilitiesUsed = Player.abilitiesUsed or 0,
+        bossesDefeated = bossesDefeated or 0,
+        -- outcome is passed as a separate param to EndRun:enter
+    }
+    local currentOutcome = win and "win" or "gameOver"
+    Gamestate.push(EndRun, currentOutcome, statsTable)
+    return
 end
 
+local stages = require('src.stages.init')
+Game.stages = stages
 function Game:load()
     local ww, wh = love.graphics.getWidth(), love.graphics.getHeight()
     print("Game:load() - Loading level: ", level)
-    print("Game:load() - selectedCharacter:", selectedCharacter and selectedCharacter.name or 'NIL', tostring(selectedCharacter))
-    -- Map variety: each level changes grid size, realm, enemies
-    local margin = 32
-    local gridW, gridH = 24, 16
-    if level % 3 == 2 then gridW, gridH = 28, 14 end
-    if level % 3 == 0 then gridW, gridH = 20, 20 end
+    -- Stage system: pick stage by level (cycle if needed)
+    local stageIdx = ((level-1) % #stages) + 1
+    local stage = stages[stageIdx]
+    print("Stage:", stage.name)
+    -- Grid size and percent
+    local gridW, gridH = stage.gridW or 24, stage.gridH or 16
     Grid.width = gridW
     Grid.height = gridH
-    Grid:setSizeToWindow(ww, wh, margin)
+    Grid:setSizeToWindow(ww, wh, 32)
     Grid:load()
     enemies = {}
+    powerups = {}
+    powerupSpawnTimer = 0
+    -- Enemies for this stage
+    for _, e in ipairs(stage.enemies(level, enemiesLib, Grid)) do table.insert(enemies, e) end
+    -- PowerUps for this stage (always pass PowerUps table)
+    local powerupsList = {}
+    if stage.powerups then
+        powerupsList = stage.powerups(level, _G.PowerUps or PowerUps, Grid) or {}
+    else
+        -- Add Freeze powerup every 3rd level as דוגמה
+        if level % 3 == 0 then table.insert(powerupsList, PowerUps.Freeze) end
+    end
+    for _, pu in ipairs(powerupsList) do table.insert(powerups, pu) end
+    -- Special rules for this stage
+    if stage.special then stage.special(self, Player, Grid) end
+
     -- Character unlock logic: only mark unlock as pending if boss is present and not yet defeated
     for idx, unlockLevel in pairs(characterUnlockLevels) do
         if level == unlockLevel and not self:isCharacterUnlocked(idx) and not characterUnlockPending[idx] then
@@ -154,57 +233,12 @@ function Game:load()
     Player.character = characterToLoad
     print('DEBUG: Player.character is now:', Player.character and Player.character.name or 'NIL', tostring(Player.character))
     self:applyCharacterPassives()
-    -- Enemy variety: each level adds/changes enemies
-    if level % 3 == 0 then
-        local reclaimer = enemiesLib.Reclaimer:new(Grid.width-2, 2, level)
-        table.insert(enemies, reclaimer)
-        local jammer = enemiesLib.Jammer:new(2, Grid.height-2, level)
-        table.insert(enemies, jammer)
-        if level % 5 == 0 then
-            table.insert(enemies, enemiesLib.Jammer:new(Grid.width-3, 3, level))
-        end
-    elseif level % 2 == 0 then
-        table.insert(enemies, enemiesLib.Chaser:new(Grid.width-1, Grid.height-1, level))
-        table.insert(enemies, enemiesLib.Jammer:new(2, 2, level))
-        if level > 6 then
-            table.insert(enemies, enemiesLib.Chaser:new(2, Grid.height-2, level))
-        end
-    else
-        table.insert(enemies, enemiesLib.Chaser:new(Grid.width-1, 2, level))
-        table.insert(enemies, enemiesLib.Chaser:new(2, Grid.height-1, level))
-        enemies[#enemies].moveDelay = 1.8
-        if #enemies > 1 then enemies[#enemies-1].moveDelay = 1.8 end
-        if level > 7 then
-            table.insert(enemies, enemiesLib.Jammer:new(Grid.width-3, 2, level))
-        end
+    -- Apply per-character, per-stage modifiers
+    if Player.character and Player.character.characterStageModifier then
+        Player.character:characterStageModifier(stage, Player, Grid)
     end
-    -- Add more enemies as levels increase for challenge
-    if level >= 4 then
-        table.insert(enemies, enemiesLib.GuardianBreaker:new(Grid.width-2, Grid.height-2))
-    end
-    if level % 5 == 0 then
-        table.insert(enemies, enemiesLib.ReclaimerBoss:new(math.floor(Grid.width/2), math.floor(Grid.height/2)))
-    end
+    -- After stage.special, all enemy logic is now handled by the stage definition
 
-    for _, enemy in ipairs(enemies) do
-        if enemy.type then
-            self:applyEnemyPassives(enemy, level)
-        end
-    end
-    -- Forced slow for all enemies on level 3,6,9... (must be after all passives)
-    if level % 3 == 0 then
-        for _, enemy in ipairs(enemies) do
-            -- תקן: אל תאט אויבים מסוג Jammer מתחת ל-1.2 שניות
-            if enemy.type == "Jammer" then
-                enemy.moveDelay = math.max(tonumber(enemy.moveDelay) or 0, 1.2)
-            else
-                local delay = tonumber(enemy.moveDelay) or 0
-                enemy.moveDelay = math.max(delay, 2.5)
-            end
-            enemy._forcedSlow = true
-            print('DEBUG: FINAL SLOWDOWN', enemy.type, 'moveDelay:', enemy.moveDelay)
-        end
-    end
     Grid.enemies = enemies
     gameOver = false
     win = false
@@ -229,6 +263,35 @@ function Game:load()
     for _, enemy in ipairs(enemies) do
         print('DEBUG: ENEMY', enemy.type, 'moveDelay:', enemy.moveDelay, '_forcedSlow:', enemy._forcedSlow)
     end
+
+    -- יציבות אויבים: מניעת הופעה על מכשול או תא חסום
+    for _, enemy in ipairs(enemies) do
+        if Grid.cells[enemy.i] and (Grid.cells[enemy.i][enemy.j] == 'obstacle' or Grid.cells[enemy.i][enemy.j] == 'claimed') then
+            -- מצא תא פנוי קרוב
+            for di=-1,1 do for dj=-1,1 do
+                local ni, nj = enemy.i+di, enemy.j+dj
+                if Grid:isInside(ni, nj) and Grid.cells[ni] and Grid.cells[ni][nj] == 'empty' then
+                    enemy.i, enemy.j = ni, nj
+                    break
+                end
+            end end
+        end
+    end
+
+    -- ייצוב תנועת אויבים: מניעת תנועה למכשול/קיר
+    for _, enemy in ipairs(enemies) do
+        local oldUpdate = enemy.update
+        enemy.update = function(self, dt, grid, player)
+            local prevI, prevJ = self.i, self.j
+            oldUpdate(self, dt, grid, player)
+            if grid.cells[self.i] and (grid.cells[self.i][self.j] == 'obstacle' or grid.cells[self.i][self.j] == 'claimed') then
+                self.i, self.j = prevI, prevJ -- לא לזוז למכשול
+            end
+        end
+    end
+
+    -- Modular: All character-specific stage logic is now handled in characterStageModifier in each character module.
+    -- Remove hardcoded logic for vision, obstacles, etc. from here.
 end
 
 function Game:addScore(points)
@@ -237,57 +300,125 @@ end
 
 -- Add pause/reset
 local paused = false
+local fps = 0
+local fpsTimer = 0
+local fpsCount = 0
+
+local transitionAlpha = 0
+local transitionDir = 0 -- 1=fade in, -1=fade out
+local transitionCallback = nil
+
+function Game:startTransition(callback)
+    transitionAlpha = 0
+    transitionDir = 1
+    transitionCallback = callback
+end
+
 function Game:update(dt)
+    -- Handle unlock message timer
     if unlockMessage then
         unlockMessageTimer = unlockMessageTimer - dt
         if unlockMessageTimer <= 0 then
             unlockMessage = nil
         end
     end
+    -- Pause and reset controls
     if love.keyboard.isDown('p') then paused = not paused end
-    if love.keyboard.isDown('r') then self:load() end
+    if love.keyboard.isDown('r') then self:startTransition(function() self:load() end) end
     if paused then return end
 
+    -- Handle end of run (win or game over)
     if gameOver or win then
         local idx = currentCharacterIdx or 1
         if not characters[unlockedCharacters[idx]] then idx = 1 end
         local statsTable = {
             level = level,
-            characterName = (selectedCharacter and selectedCharacter.name)
-                or (Player.character and Player.character.name)
+            characterName = (selectedCharacter and selectedCharacter.name) ~= nil and (selectedCharacter and selectedCharacter.name)
+                or ((Player.character and Player.character.name) ~= nil and (Player.character and Player.character.name))
                 or (characters[unlockedCharacters[idx]].name),
             claimedPercent = math.floor(Grid:getClaimedPercent()*100),
             requiredPercent = math.floor(Grid.requiredClaimedPercent*100),
-            areaCleared = (Grid.width-2)*(Grid.height-2), 
+            areaCleared = (Grid.width-2)*(Grid.height-2),
             score = score,
             deaths = deaths,
             wins = wins,
+            zonesClosed = zonesClosed or 0,
+            abilitiesUsed = Player.abilitiesUsed or 0,
+            bossesDefeated = bossesDefeated or 0,
             -- outcome is passed as a separate param to EndRun:enter
         }
         local currentOutcome = win and "win" or "gameOver"
-        Gamestate.push(EndRun, currentOutcome, statsTable) -- Use push to go to EndRun
-        return 
+        Gamestate.push(EndRun, currentOutcome, statsTable)
+        return
     end
 
+    -- Handle transition fade
+    if transitionDir ~= 0 then
+        transitionAlpha = transitionAlpha + transitionDir * dt * 2.2
+        if transitionDir == 1 and transitionAlpha >= 1 then
+            transitionAlpha = 1
+            transitionDir = -1
+            if transitionCallback then transitionCallback() end
+        elseif transitionDir == -1 and transitionAlpha <= 0 then
+            transitionAlpha = 0
+            transitionDir = 0
+            transitionCallback = nil
+        end
+    end
+
+    -- Update game state
     elapsedTime = love.timer.getTime() - startTime
     Grid:update(dt)
-    -- Realm-specific update (for echo effect, etc)
+
+    -- Update Freeze powerup effect
+    if PowerUps.Freeze then
+        PowerUps.Freeze:update(dt, self, Grid, Player, enemies)
+    end
+
+    -- FPS counter
+    fpsTimer = fpsTimer + dt
+    fpsCount = fpsCount + 1
+    if fpsTimer >= 1 then
+        fps = fpsCount
+        fpsCount = 0
+        fpsTimer = fpsTimer - 1
+    end
+
+    -- Stage-specific update hooks (onslaught, moving obstacles, custom win)
+    local stageIdx = ((level-1) % #stages) + 1
+    local stage = stages[stageIdx]
+    if stage and stage.special then
+        if Grid._onslaughtAddEnemy then
+            Grid._onslaughtAddEnemy(dt, enemiesLib, Grid, enemies)
+        end
+        if Grid._moveObstacles then
+            Grid._moveObstacles(dt, Grid)
+        end
+        if Game.checkWinCondition and Game.checkWinCondition() then
+            win = true
+            wins = wins + 1
+        end
+    end
+
+    -- Realm-specific update (e.g., echo effect)
     if currentRealm and currentRealm.update then
         currentRealm:update(dt, Grid)
     end
+
     Player:update(dt, Grid)
-    -- Enemy kills player if on same cell or on any trail cell (even if not drawing)
+
+    -- Enemy and player collision logic
     for _, enemy in ipairs(enemies) do
-        enemy:update(dt, Grid, Player)
-
-        -- Player's current node
+        if PowerUps.Freeze and PowerUps.Freeze:isEnemyFrozen(enemy) then
+            -- Skip enemy update if frozen
+        else
+            enemy:update(dt, Grid, Player)
+        end
+        -- Check direct collision with player
         local p_node_i, p_node_j = Player.i, Player.j
-
-        -- 1. Direct collision with player's current position (node)
-        -- An enemy in a cell is considered colliding if its cell is one of the 4 around the player's node.
         local cells_around_player_node = {
-            {i = p_node_i - 1, j = p_node_j - 1}, {i = p_node_i, j = p_node_j - 1}, -- Top-left, Top-right cells relative to node
-            {i = p_node_i - 1, j = p_node_j},     {i = p_node_i, j = p_node_j}      -- Bottom-left, Bottom-right cells relative to node
+            {i = p_node_i - 1, j = p_node_j - 1}, {i = p_node_i, j = p_node_j - 1},
+            {i = p_node_i - 1, j = p_node_j},     {i = p_node_i, j = p_node_j}
         }
         for _, cell_coord in ipairs(cells_around_player_node) do
             if Grid:isInside(cell_coord.i, cell_coord.j) then
@@ -297,61 +428,45 @@ function Game:update(dt)
                 end
             end
         end
-        if gameOver then break end -- Break from enemies loop if collision detected
-
-        -- 2. Collision with player's active trail
+        if gameOver then break end
+        -- Check collision with player's active trail
         if Player.isDrawing and #Player.trail >= 2 then
             for k = 1, #Player.trail - 1 do
-                local n1 = Player.trail[k] -- Start node of trail segment
-                local n2 = Player.trail[k+1] -- End node of trail segment
-                local ei, ej = enemy.i, enemy.j -- Enemy's cell coordinates
-
+                local n1 = Player.trail[k]
+                local n2 = Player.trail[k+1]
+                local ei, ej = enemy.i, enemy.j
                 local hit_trail_segment = false
-                if n1.i == n2.i then -- Vertical trail segment (nodes share same i, form a vertical line)
-                    -- This node line is at x-coordinate n1.i.
-                    -- It separates cell column (n1.i - 1) from cell column n1.i.
-                    -- The relevant cell row for collision is the one corresponding to the start of the node segment, which is min(n1.j, n2.j).
-                    if ej == math.min(n1.j, n2.j) then -- Enemy is in a cell row that aligns with the vertical trail segment
-                        if ei == n1.i - 1 or ei == n1.i then -- Enemy is in one of the two cell columns adjacent to the vertical node line
+                if n1.i == n2.i then
+                    if ej == math.min(n1.j, n2.j) then
+                        if ei == n1.i - 1 or ei == n1.i then
                             hit_trail_segment = true
                         end
                     end
-                elseif n1.j == n2.j then -- Horizontal trail segment (nodes share same j, form a horizontal line)
-                    -- This node line is at y-coordinate n1.j.
-                    -- It separates cell row (n1.j - 1) from cell row n1.j.
-                    -- The relevant cell column for collision is the one corresponding to the start of the node segment, which is min(n1.i, n2.i).
-                    if ei == math.min(n1.i, n2.i) then -- Enemy is in a cell column that aligns with the horizontal trail segment
-                        if ej == n1.j - 1 or ej == n1.j then -- Enemy is in one of the two cell rows adjacent to the horizontal node line
+                elseif n1.j == n2.j then
+                    if ei == math.min(n1.i, n2.i) then
+                        if ej == n1.j - 1 or ej == n1.j then
                             hit_trail_segment = true
                         end
                     end
                 end
-
                 if hit_trail_segment then
                     print("Enemy collided with player trail segment between N("..n1.i..","..n1.j..") and N("..n2.i..","..n2.j.."). Enemy at C("..ei..","..ej..")")
-                    
-                    if not Player.isFuseActive then
+                    if Player.fuseShieldActive then
+                        -- Guardian's shield blocks death
+                        Player.fuseShieldActive = false
+                        Player.fuseTimer = 0
+                    elseif not Player.isFuseActive then
+                        -- Start fuse instead of instant death
                         Player.isFuseActive = true
-                        Player.fuseTimer = Player.fuseDuration
-                        Player.fusedEnemy = enemy -- Store the enemy
-                        
-                        -- Store a copy of the current trail for the burning effect
-                        Player.burningTrail = shallowcopy(Player.trail) 
-                        -- Store the index of the *start node* of the hit segment
-                        -- Player.trail[k] is the start node (n1)
-                        Player.fuseHitSegmentIndex = k 
-
-                        print(string.format("Fuse activated! Burning trail from segment %d. Trail length: %d", k, #Player.burningTrail))
-                        -- Sound.play('fuse_activate') -- Example sound effect
+                        Player.fuseTimer = Player.fuseDuration or 2.5
+                        Player.burningTrail = {}
+                        for _, node in ipairs(Player.trail) do table.insert(Player.burningTrail, {i=node.i, j=node.j}) end
+                        -- Optional: play fuse sound/flash
                     end
-                    -- Do not set gameOver = true here anymore, let the fuse timer handle it
+                    break
                 end
             end
-            -- if gameOver then break end -- No longer needed here as fuse handles game over
         end
-
-        -- Old trail collision logic (based on Grid.cells[i][j] == 'trail') is removed as it's not compatible with node-based trails.
-        -- The old direct collision (enemy.i == Player.i and enemy.j == Player.j) was also incorrect.
     end
     -- Check win condition
     if Grid:getClaimedPercent() >= Grid.requiredClaimedPercent then
@@ -360,117 +475,93 @@ function Game:update(dt)
     end
 end
 
--- Add: Show which character will unlock at the next boss level
-function Game:getNextUnlockInfo()
-    local nextLevel, nextIdx = nil, nil
-    for idx, unlockLevel in pairs(characterUnlockLevels) do
-        if not self:isCharacterUnlocked(idx) and (not nextLevel or unlockLevel < nextLevel) and unlockLevel >= level then
-            nextLevel = unlockLevel
-            nextIdx = idx
-        end
-    end
-    if nextLevel and nextIdx then
-        return nextLevel, characters[nextIdx] and characters[nextIdx].name or ("Character #"..nextIdx)
-    end
-    return nil, nil
-end
-
--- Add: Enemy passives and escalation for higher levels
-function Game:applyEnemyPassives(enemy, level)
-    if enemy._forcedSlow then
-        -- Do not override moveDelay or any parameter if enemy was forcibly slowed
-        return
-    end
-    if enemy.type == "Chaser" and level >= 7 then
-        enemy.moveDelay = math.max(0.4, (enemy.moveDelay or 1) * 0.85)
-        enemy.smartChase = true -- Smarter pathfinding at high levels
-    elseif enemy.type == "Jammer" and level >= 8 then
-        enemy.jamRadius = (enemy.jamRadius or 2) + 1
-    elseif enemy.type == "GuardianBreaker" and level >= 10 then
-        enemy.breakSpeed = (enemy.breakSpeed or 1) * 1.2
-    elseif enemy.type == "ReclaimerBoss" then
-        enemy.moveDelay = math.max(0.3, (enemy.moveDelay or 1) * (0.95 - 0.01 * level))
-        enemy.extraAttack = level >= 12
-    end
-end
+local glowShader = love.graphics.newShader("shaders/glow.glsl")
+glowShader:send("strength", 0.18)
 
 function Game:draw()
+    love.graphics.setShader(glowShader)
     Grid:draw()
     Player:draw(Grid)
     for _, enemy in ipairs(enemies) do
         enemy:draw(Grid)
     end
-
-    -- HUD: character, ability, cooldown
-    love.graphics.setFont(love.graphics.newFont(16))
-    love.graphics.setColor(0.13,0.13,0.18,0.85)
-    love.graphics.rectangle('fill', 12, 12, 220, 60, 10, 10)
-    love.graphics.setColor(1,1,1)
-    local char = Player.character or selectedCharacter
-    love.graphics.print('Character: '..(char and char.name or 'N/A'), 24, 24)
-    if char and char.activeAbilityName then
-        love.graphics.setColor(0.8,0.9,1)
-        love.graphics.print('Ability: '..char.activeAbilityName, 24, 44)
-        if Player.abilityCooldown then
-            love.graphics.setColor(1,0.7,0.2)
-            love.graphics.print('Cooldown: '..string.format('%.1f', Player.abilityCooldown), 140, 44)
+    -- Draw powerups on grid
+    if Grid.powerups then
+        for _, powerup in ipairs(Grid.powerups) do
+            if not powerup.collected then
+                powerup:draw(Grid)
+            end
         end
     end
-    love.graphics.setColor(1,1,1)
-
-    -- Minimized In-Game Statistics (Top Right)
-    if not gameOver and not win then
-        local percent = math.floor(Grid:getClaimedPercent()*100)
-        local req = math.floor(Grid.requiredClaimedPercent*100)
-        local character = selectedCharacter or self.selectedCharacter or Player.character or characters[unlockedCharacters[1]]
-        local minimizedPanelW, minimizedPanelH = 220, 100
-        local mpx, mpy = love.graphics.getWidth() - minimizedPanelW - 10, 10
-        love.graphics.setColor(0.95,0.95,0.95,0.6)
-        love.graphics.rectangle('fill', mpx, mpy, minimizedPanelW, minimizedPanelH, 8, 8)
-        love.graphics.setColor(0.1,0.1,0.1)
-        love.graphics.setFont(love.graphics.newFont(11))
-        love.graphics.print('Lvl: '..level, mpx+8, mpy+5)
-        love.graphics.print('Char: '..(character and character.name or 'N/A'), mpx+8, mpy+20)
-        love.graphics.print('Claimed: '..percent..'/'..req..'%', mpx+8, mpy+35)
-        love.graphics.print('Unlocked: '..#unlockedCharacters..'/'..#characters, mpx+8, mpy+50)
-        -- Show next unlock info
-        local nextUnlockLevel, nextUnlockName = self:getNextUnlockInfo()
-        if nextUnlockLevel then
-            love.graphics.setColor(0.2,0.5,1,0.8)
-            love.graphics.print('Next unlock: '..nextUnlockName..' (after boss L'..nextUnlockLevel..')', mpx+8, mpy+70)
-            love.graphics.setColor(0.1,0.1,0.1)
-        end
-        -- Show passive of current character
-        love.graphics.setColor(0.1,0.7,0.1,0.8)
-        love.graphics.print('Passive: '..self:getCharacterPassiveDescription(character), mpx+8, mpy+85)
-        love.graphics.setColor(0.1,0.1,0.1)
+    love.graphics.setShader()
+    self:drawUI()
+    -- Draw transition overlay
+    if transitionAlpha > 0 then
+        love.graphics.setColor(0,0,0,transitionAlpha)
+        love.graphics.rectangle('fill', 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+        love.graphics.setColor(1,1,1,1)
     end
+    -- Remove UI overlays from here (jammed tint, floating text, ability bar, unlock message)
+    -- ...rest of draw logic...
+end
 
-    -- Fuse warning message
-    if Player.isFuseActive then
-        love.graphics.setFont(love.graphics.newFont(22))
-        love.graphics.setColor(1,0.3,0.1,0.85)
-        love.graphics.printf('! FUSE ACTIVATED - RETURN TO THE FRAME !', 0, 30, love.graphics.getWidth(), 'center')
-        love.graphics.setColor(1,1,1)
+local showAbilities = false
+
+-- In the drawUI or HUD logic, show the correct stage number and claimed percent for the current stage.
+function Game:drawUI()
+    local stageIdx = ((level-1) % #stages) + 1
+    local stage = stages[stageIdx]
+    local claimed = math.floor(Grid:getClaimedPercent()*100)
+    local required = math.floor(Grid.requiredClaimedPercent*100)
+    local stageText = string.format("Level %d  Claimed: %d/%d%%", level, claimed, required)
+    love.graphics.setColor(0,0,0,0.7)
+    love.graphics.rectangle('fill', love.graphics.getWidth()/2-110, 10, 220, 32, 8, 8)
+    love.graphics.setColor(1,1,1,1)
+    love.graphics.setFont(love.graphics.newFont(18))
+    love.graphics.printf(stageText, love.graphics.getWidth()/2-100, 16, 200, 'center')
+    -- Show passive abilities for the current character only if toggled
+    if showAbilities and Player.character and Player.character.getSkillDescription then
+        love.graphics.setFont(love.graphics.newFont(14))
+        love.graphics.setColor(0.1,0.1,0.1,0.7)
+        love.graphics.rectangle('fill', 10, 10, 320, 60, 8, 8)
+        love.graphics.setColor(0.7,1,0.7,1)
+        love.graphics.printf("Passive Abilities:", 20, 16, 300, 'left')
+        love.graphics.setColor(1,1,1,1)
+        love.graphics.printf(Player.character:getSkillDescription(), 20, 36, 300, 'left')
     end
-
-    -- Show unlock message if present
-    if unlockMessage then
-        love.graphics.setFont(love.graphics.newFont(20))
-        love.graphics.setColor(0.2, 0.8, 0.2, 0.85)
-        love.graphics.printf(unlockMessage, 0, 70, love.graphics.getWidth(), 'center')
-        love.graphics.setColor(1,1,1)
-    end
-
-    love.graphics.setFont(love.graphics.newFont(16)) -- Reset font for other UI elements
-    love.graphics.setColor(1,1,1)
-
-    -- The detailed end-of-round drawing is now handled by EndRun:draw()
+    -- Debug overlay: FPS and zone state
+    love.graphics.setFont(love.graphics.newFont(12))
+    love.graphics.setColor(0.2,1,0.2,0.7)
+    love.graphics.print('FPS: '..tostring(fps), 10, love.graphics.getHeight()-24)
+    love.graphics.setColor(0.2,0.7,1,0.7)
+    love.graphics.print('Claimed: '..math.floor(Grid:getClaimedPercent()*100)..'%', 90, love.graphics.getHeight()-24)
+    love.graphics.setColor(1,1,1,1)
+    -- ...existing code for ability bar, overlays, etc...
+    -- Show hint for toggling abilities
+    love.graphics.setFont(love.graphics.newFont(12))
+    love.graphics.setColor(1,1,1,0.7)
+    love.graphics.printf("Press TAB or H to show/hide abilities", 12, 76, 300, 'left')
 end
 
 function Game:keypressed(key)
     if key == 'p' then paused = not paused end
-    if key == 'r' then self:load() end
+    if key == 'r' then self:startTransition(function() self:load() end) end
+    -- Quick restart: Enter/Space on end screen
+    if (gameOver or win) and (key == 'return' or key == 'space') then
+        self:startTransition(function()
+            level = 1
+            deaths = 0
+            wins = 0
+            score = 0
+            zonesClosed = 0
+            bossesDefeated = 0
+            Player.abilitiesUsed = 0
+            self:load()
+        end)
+    end
+    if key == 'tab' or key == 'h' then
+        showAbilities = not showAbilities
+    end
     -- All keypress logic for win/gameOver states is now in EndRun:keypressed
 end
 
@@ -534,6 +625,14 @@ function Game:getCharacterIndex(character_obj)
     return 1 -- fallback to first
 end
 
+-- In Player:update(dt, Grid):
+-- If Player.isJammed, reduce speed
+if Player.isJammed then
+    Player.speedModifier = 0.6
+elseif Player.speedModifier and Player.speedModifier ~= 1 then
+    Player.speedModifier = 1
+end
+
 -- Add: Give each character a passive bonus (example: speed, score, etc.)
 function Game:applyCharacterPassives()
     if not Player.character then return end
@@ -576,5 +675,26 @@ end
 
 -- Expose characterUnlockLevels to other modules (for select_character.lua to show unlock info).
 Game.characterUnlockLevels = characterUnlockLevels
+
+-- Define PowerUps table at the top of game.lua so it is available for stage powerup spawning.
+local Freeze = require('src.powerups.freeze')
+local PowerUps = { SpeedBoost = require('src.powerups.speed_boost'), Freeze = Freeze }
+
+-- Add: Show which character will unlock at the next boss level
+function Game:getNextUnlockInfo()
+    local nextLevel, nextIdx = nil, nil
+    for idx, unlockLevel in pairs(characterUnlockLevels) do
+        if not self:isCharacterUnlocked(idx) and (not nextLevel or unlockLevel < nextLevel) and unlockLevel >= level then
+            nextLevel = unlockLevel
+            nextIdx = idx
+        end
+    end
+    if nextLevel and nextIdx then
+        return nextLevel, characters[nextIdx] and characters[nextIdx].name or ("Character #"..nextIdx)
+    end
+    return nil, nil
+end
+
+_G.PowerUps = PowerUps
 
 return Game

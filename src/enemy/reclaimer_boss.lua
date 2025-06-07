@@ -62,13 +62,22 @@ function ReclaimerBoss:reclaimZone(grid)
 end
 
 function ReclaimerBoss:draw(grid)
-    love.graphics.setColor(0.8, 0.1, 0.8)
     local x = grid.offsetX + (self.i-0.5)*grid.cellSize
     local y = grid.offsetY + (self.j-0.5)*grid.cellSize
-    love.graphics.circle('fill', x, y, grid.cellSize*0.45)
+    -- Unique: Boss is a magenta star with aura
+    love.graphics.setColor(0.8, 0.1, 0.8)
+    local r = grid.cellSize*0.28
+    local points = {}
+    for i=1,10 do
+        local angle = (i-1)*math.pi/5
+        local rad = (i%2==1) and r or r*0.55
+        table.insert(points, x + math.cos(angle)*rad)
+        table.insert(points, y + math.sin(angle)*rad)
+    end
+    love.graphics.polygon('fill', points)
     -- Draw boss aura (pulses when about to reclaim)
     local pulse = 0.18 + 0.18*math.abs(math.sin(love.timer.getTime()*2))
-    if self.reclaimTimer < 2 then
+    if self.reclaimTimer and self.reclaimTimer < 2 then
         love.graphics.setColor(0.8, 0.1, 0.8, 0.35 + 0.35*pulse)
         love.graphics.circle('fill', x, y, grid.cellSize*(0.7+pulse))
     else

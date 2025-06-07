@@ -1,6 +1,12 @@
 local love = require "love"
 local Gamestate = require 'hump.gamestate'
 local EndRun = {}
+-- local Game = require('src.game') -- REMOVE THIS LINE TO BREAK THE CIRCULAR DEPENDENCY
+local stages = require('src.stages.init')
+
+local font_title = love.graphics.newFont(36)
+local font_stats = love.graphics.newFont(18)
+local font_footer = love.graphics.newFont(16)
 
 local outcomeMessage = ""
 local stats = {}
@@ -51,59 +57,108 @@ function EndRun:update(dt)
 end
 
 function EndRun:draw()
-    local screenW, screenH = love.graphics.getWidth(), love.graphics.getHeight()
-
-    -- Background overlay (optional, to dim the game behind)
-    love.graphics.setColor(0, 0, 0, 0.5)
-    love.graphics.rectangle("fill", 0, 0, screenW, screenH)
-
-    -- Stats Box
-    local boxW, boxH = 320, 200 -- Adjusted size
-    local boxX, boxY = (screenW - boxW) / 2, (screenH - boxH) / 2
-
-    love.graphics.setColor(0.2, 0.2, 0.25, 0.9) -- Darker background for stats
-    love.graphics.rectangle('fill', boxX, boxY, boxW, boxH, 15, 15)
-    
-    -- Outcome Message
-    love.graphics.setFont(fontLarge)
-    if stats.outcome == "win" then
-        love.graphics.setColor(0.2, 1, 0.2, 0.95)
-    else
-        love.graphics.setColor(1, 0.2, 0.2, 0.95)
+    local ww, wh = love.graphics.getWidth(), love.graphics.getHeight()
+    -- Animated gradient background for end screen
+    for i=0, wh, 2 do
+        local t = i/wh
+        love.graphics.setColor(0.18*(1-t)+0.32*t, 0.22*(1-t)+0.36*t, 0.28*(1-t)+0.44*t + 0.04*math.sin(love.timer.getTime()*0.7+i*0.01), 1)
+        love.graphics.rectangle('fill', 0, i, ww, 2)
+        if i%18==0 then
+            love.graphics.setColor(0.12,0.18,0.28,0.10+0.08*math.abs(math.sin(love.timer.getTime()*0.5+i*0.02)))
+            for x=0,ww,40 do
+                love.graphics.circle('fill', x, i, 10+2*math.sin(love.timer.getTime()+x*0.01+i*0.01))
+            end
+        end
     end
-    love.graphics.printf(outcomeMessage, 0, boxY - 60, screenW, 'center')
-
-    -- Stats Text
-    love.graphics.setFont(fontSmall)
-    love.graphics.setColor(0.95, 0.95, 0.95)
-    
-    local statText = string.format(
-        "Level: %s\nCharacter: %s\nClaimed: %s/%s%%\nArea Cleared: %s\nFinal Score: %s\nDeaths: %s | Wins: %s",
-        stats.level or "N/A",
-        stats.characterName or "N/A",
-        stats.claimedPercent or "N/A",
-        stats.requiredPercent or "N/A",
-        stats.areaCleared or "N/A",
-        stats.score or "N/A",
-        stats.deaths or "N/A",
-        stats.wins or "N/A"
-    )
-    love.graphics.printf(statText, boxX + 20, boxY + 20, boxW - 40, 'left')
-
-    -- Continue Prompt
-    love.graphics.setFont(fontMedium)
-    love.graphics.setColor(0.9, 0.9, 0.9, 0.9)
-    local continuePrompt = (stats.outcome == "win") and "Press any key for NEXT LEVEL" or "Press any key to RESTART"
-    love.graphics.printf(continuePrompt, 0, boxY + boxH + 30, screenW, 'center')
-
-    love.graphics.setColor(1,1,1) -- Reset color
+    -- Title with animated shadow
+    love.graphics.setFont(font_title)
+    for dx=-3,3 do for dy=-3,3 do
+        if dx~=0 or dy~=0 then
+            love.graphics.setColor(0,0,0,0.18-0.02*math.abs(dx*dy))
+            love.graphics.printf(outcomeMessage, dx, 80+dy, ww, 'center')
+        end
+    end end
+    love.graphics.setColor(1,1,1)
+    love.graphics.printf(outcomeMessage, 0, 80, ww, 'center')
+    -- Stats box with animated border
+    local boxY = 160
+    local pulse = 0.95+0.05*math.sin(love.timer.getTime()*3)
+    love.graphics.setColor(0.2*pulse,0.7*pulse,1*pulse, 0.18+0.08*pulse)
+    love.graphics.rectangle('fill', ww/2-220, boxY, 440, 320, 24, 24)
+    love.graphics.setColor(1, 0.85, 0.2, 0.9)
+    love.graphics.setLineWidth(4)
+    love.graphics.rectangle('line', ww/2-220, boxY, 440, 320, 24, 24)
+    love.graphics.setLineWidth(1)
+    -- Add animated stats icon
+    local statsPulse = 0.9+0.1*math.sin(love.timer.getTime()*2.7)
+    love.graphics.setColor(0.2*statsPulse,1*statsPulse,0.7*statsPulse,0.7)
+    love.graphics.circle('fill', ww/2, boxY+40, 18+4*statsPulse, 36)
+    love.graphics.setColor(1,1,1,0.18)
+    love.graphics.circle('line', ww/2, boxY+40, 22+5*statsPulse, 36)
+    -- Draw trophy or skull icon
+    if stats.outcome == 'win' then
+        love.graphics.setColor(1, 0.85, 0.2, 0.8)
+        love.graphics.circle('fill', ww/2, boxY+40, 22, 32)
+        love.graphics.setColor(0.7,0.5,0.1,1)
+        love.graphics.rectangle('fill', ww/2-10, boxY+62, 20, 14, 5, 5)
+    else
+        love.graphics.setColor(0.8,0.2,0.2,0.8)
+        love.graphics.circle('fill', ww/2, boxY+40, 22, 32)
+        love.graphics.setColor(0.2,0.2,0.2,1)
+        love.graphics.rectangle('fill', ww/2-10, boxY+62, 20, 14, 5, 5)
+    end
+    love.graphics.setColor(1,1,1,1)
+    -- Stats text
+    love.graphics.setFont(font_stats)
+    -- Show both stage and cumulative stats at end of run
+    local statsY = boxY+90
+    local statsList = {}
+    if stats.level then table.insert(statsList, 'Level: '..stats.level) end
+    if stats.characterName then table.insert(statsList, 'Character: '..stats.characterName) end
+    if stats.claimedPercent and stats.requiredPercent then table.insert(statsList, 'Claimed: '..stats.claimedPercent..'/'..stats.requiredPercent..'%') end
+    if stats.score then table.insert(statsList, 'Score (Stage): '..stats.score) end
+    if stats.zonesClosed then table.insert(statsList, 'Zones Closed (Stage): '..stats.zonesClosed) end
+    if stats.abilitiesUsed then table.insert(statsList, 'Abilities Used (Stage): '..stats.abilitiesUsed) end
+    if stats.bossesDefeated then table.insert(statsList, 'Bosses Defeated (Total): '..stats.bossesDefeated) end
+    if stats.deaths then table.insert(statsList, 'Total Deaths: '..stats.deaths) end
+    if stats.wins then table.insert(statsList, 'Total Wins: '..stats.wins) end
+    -- Cumulative stats (if available)
+    if stats.cumulative then
+        table.insert(statsList, '---')
+        table.insert(statsList, 'Cumulative Stats:')
+        if stats.cumulative.totalScore then table.insert(statsList, 'Total Score: '..stats.cumulative.totalScore) end
+        if stats.cumulative.totalZonesClosed then table.insert(statsList, 'Total Zones Closed: '..stats.cumulative.totalZonesClosed) end
+        if stats.cumulative.totalAbilitiesUsed then table.insert(statsList, 'Total Abilities Used: '..stats.cumulative.totalAbilitiesUsed) end
+        if stats.cumulative.totalDeaths then table.insert(statsList, 'Total Deaths: '..stats.cumulative.totalDeaths) end
+        if stats.cumulative.totalWins then table.insert(statsList, 'Total Wins: '..stats.cumulative.totalWins) end
+        -- Show any other stats
+        for k, v in pairs(stats.cumulative) do
+            if not (k == 'totalScore' or k == 'totalZonesClosed' or k == 'totalAbilitiesUsed' or k == 'totalDeaths' or k == 'totalWins') then
+                table.insert(statsList, k..': '..v)
+            end
+        end
+    end
+    if stats.outcome == 'win' then
+        table.insert(statsList, 'Great job! Next level unlocked!')
+    elseif stats.outcome == 'gameOver' then
+        table.insert(statsList, 'Try again to beat your best!')
+    end
+    for i, stat in ipairs(statsList) do
+        love.graphics.setColor(0.8,0.9,1,0.92)
+        love.graphics.printf(stat, ww/2-200, statsY+(i-1)*32, 400, 'center')
+    end
+    -- Footer
+    love.graphics.setFont(font_footer)
+    love.graphics.setColor(0.7,0.9,1,0.7)
+    love.graphics.printf('Press Enter/Space to continue', 0, wh-40, ww, 'center')
 end
 
 function EndRun:keypressed(key)
     print("EndRun:keypressed - About to pop. stats.outcome type: " .. type(stats.outcome) .. ", value: " .. tostring(stats.outcome)) -- DEBUG
     -- When a key is pressed, EndRun simply pops itself from the Gamestate stack.
     -- It passes its stored 'stats.outcome' back to the previous state (which should be Game).
-    Gamestate.pop(stats.outcome) 
+    -- Fix: pass also the stages table if needed
+    Gamestate.pop(stats.outcome, stages)
 end
 
 function EndRun:leave()

@@ -1,3 +1,6 @@
+-- src/player.lua
+-- Handles player input, movement, trail creation, hitbox logic, and all speed modifiers via getCurrentSpeed()
+
 local love = require "love" -- Added missing love require
 local Player = {}
 local Gamestate = require 'hump.gamestate' -- For accessing game state
@@ -10,6 +13,10 @@ local function getCharacterByName(name)
     return characters[1] -- fallback to first
 end
 
+---
+-- Loads the player with the given grid and character.
+-- @param grid The grid object
+-- @param character The character table (optional)
 function Player:load(grid, character)
     print('DEBUG: Player:load called with character:', character and character.name or 'NIL', tostring(character))
     if character then
@@ -76,16 +83,35 @@ function Player:load(grid, character)
         if not self.character.decoyDuration then self.character.decoyDuration = 2.5 end
         if not self.character.decoyCooldown then self.character.decoyCooldown = 8 end
     end
+
+    Player.abilitiesUsed = 0
+    Player._abilityFlashTimer = 0
+
+    self.fadingTrails = {} -- List of {trail=table, timer=number}
 end
 
+---
+-- Returns true if the given cell is claimed.
+-- @param grid The grid object
+-- @param i The cell's i index
+-- @param j The cell's j index
 local function isClaimed(grid, i, j)
     return grid.cells[i] and (grid.cells[i][j] == 'claimed')
 end
 
+---
+-- Returns true if the given cell is part of the trail.
+-- @param grid The grid object
+-- @param i The cell's i index
+-- @param j The cell's j index
 local function isTrail(grid, i, j)
     return grid.cells[i] and (grid.cells[i][j] == 'trail')
 end
 
+---
+-- Updates the player state (movement, abilities, fuse, etc).
+-- @param dt Delta time
+-- @param grid The grid object
 function Player:update(dt, grid)
     if self.moveTimer == nil then -- Safeguard against nil moveTimer
         print("Warning: Player.moveTimer was nil, re-initializing to 0.")
@@ -154,29 +180,39 @@ function Player:update(dt, grid)
 
     -- Fuse Mechanic Update
     if self.isFuseActive then
-        -- Realm-specific fuse logic
-        local realm = grid.currentRealm or (grid.realm and grid.realm.name)
-        if self.fuseShieldActive then
-            -- Shield blocks fuse
+        -- בדיקה: האם השחקן חזר לשטח בטוח (קו גבול, תא claimed או תא island)
+        local onBorder = (self.i == 1 or self.i == grid.width or self.j == 1 or self.j == grid.height)
+        local onClaimed = (grid.cells[self.i] and (grid.cells[self.i][self.j] == 'claimed' or grid.cells[self.i][self.j] == 'island'))
+        if onBorder or onClaimed then
+            -- שרוף את ה-trail בלבד, השחקן שורד, פיוז מתאפס מיד
+            if self.burningTrail then
+                for _, node in ipairs(self.burningTrail) do
+                    if grid.cells[node.i] and grid.cells[node.i][node.j] == 'trail' then
+                        grid.cells[node.i][node.j] = 'empty'
+                    end
+                end
+            end
+            self.trail = {}
+            self.isDrawing = false
+            self.isFuseActive = false
+            self.burningTrail = nil
+        elseif self.fuseShieldActive then
             self.isFuseActive = false
             self.fuseTimer = 0
-        elseif realm == "Pulse Mines" then
-            self.fuseTimer = self.fuseTimer - dt*1.5 -- faster fuse
-        elseif realm == "Echo Lab" and #self.trail > 0 and #self.trail < 6 then
-            self.fuseTimer = self.fuseTimer + dt*0.5 -- closing small area resets fuse
-        elseif realm == "Void Hatchery" and grid.enemies then
-            local danger = 0
-            for _,e in ipairs(grid.enemies) do if e.name == "GuardianBreaker" then danger = danger + 1 end end
-            self.fuseTimer = self.fuseTimer - dt*(1+danger*0.5)
         else
             self.fuseTimer = self.fuseTimer - dt
-        end
-        if self.fuseTimer <= 0 then
-            self.isFuseActive = false
-            self.fuseTimer = 0
-            local game = require('src.game')
-            if game and game.gameOver ~= nil then
-                game.gameOver = true
+            if self.fuseTimer <= 0 then
+                -- פיוז נגמר: אם השחקן לא חזר לשטח, מוות
+                self.isFuseActive = false
+                self.fuseTimer = 0
+                local game = require('src.game')
+                if game and game.gameOver ~= nil then
+                    game.gameOver = true
+                end
+                self.fuseBurnFlash = 0.5
+                if love.audio and self.fuseBurnSound then
+                    love.audio.play(self.fuseBurnSound)
+                end
             end
         end
     end
@@ -216,17 +252,95 @@ function Player:update(dt, grid)
         end
     end
 
-    -- Handle active ability (Trickster example)
-    if self.character and self.character.name == "Trickster" then
+    -- Handle active ability cooldown (for characters with an active ability)
+    if self.character and self.character.activateAbility then
         if not self.abilityCooldown then self.abilityCooldown = 0 end
-        if love.keyboard.isDown('space') and self.abilityCooldown <= 0 then
-            -- Swap with decoy (for demo, just print and reset cooldown)
-            print("Trickster used Decoy Swap!")
-            self.abilityCooldown = self.character.activeAbilityCooldown or 8
-        end
-        if self.abilityCooldown and self.abilityCooldown > 0 then
+        if self.abilityCooldown > 0 then
             self.abilityCooldown = math.max(0, self.abilityCooldown - dt)
         end
+        -- Example: activate ability on keypress (space)
+        if love.keyboard.isDown('space') and self.abilityCooldown <= 0 then
+            if self.character.activateAbility then
+                self.character:activateAbility(self, grid)
+                self.abilityCooldown = self.character.activeAbilityCooldown or 8
+            end
+        end
+    end
+
+    -- Character-specific active abilities
+    if self.character then
+        -- Trickster: Decoy Swap (SPACE)
+        if self.character.name == "Trickster" then
+            if not self.tricksterDecoyCooldownTimer then self.tricksterDecoyCooldownTimer = 0 end
+            if not self.tricksterDecoyActive then self.tricksterDecoyActive = false end
+            if love.keyboard.isDown('space') and self.tricksterDecoyCooldownTimer <= 0 and not self.tricksterDecoyActive then
+                self.tricksterDecoyActive = true
+                self.tricksterDecoyTimer = self.character.decoyDuration or 2.5
+                self.tricksterDecoyCooldownTimer = self.character.decoyCooldown or 8
+                self.tricksterDecoyPosition = {i = self.i, j = self.j}
+                -- self.speed = (self.character.speed or 2.8) * (self.character.decoySpeedMultiplier or 1.25)
+            end
+            if self.tricksterDecoyActive then
+                self.tricksterDecoyTimer = self.tricksterDecoyTimer - dt
+                if self.tricksterDecoyTimer <= 0 then
+                    self.tricksterDecoyActive = false
+                    self.tricksterDecoyPosition = nil
+                    -- self.speed = self.character.speed or 2.8
+                end
+            end
+            if self.tricksterDecoyCooldownTimer > 0 then
+                self.tricksterDecoyCooldownTimer = self.tricksterDecoyCooldownTimer - dt
+            end
+        end
+        -- Guardian: Defuse fuse once per run (D)
+        if self.character.name == "Guardian" then
+            if not self.fuseDefused and love.keyboard.isDown('d') and self.isFuseActive then
+                self.isFuseActive = false
+                self.fuseTimer = 0
+                self.fuseDefused = true
+            end
+        end
+        -- Echo: Pulse trail to stun enemies (E)
+        if self.character.name == "Echo" or self.character.name == "The Echo" then
+            if not self.echoPulseCooldown then self.echoPulseCooldown = 0 end
+            if love.keyboard.isDown('e') and self.echoPulseCooldown <= 0 then
+                -- Stun all enemies near trail
+                if grid and grid.enemies then
+                    for _, enemy in ipairs(grid.enemies) do
+                        for _, node in ipairs(self.trail) do
+                            if math.abs(enemy.i - node.i) <= 1 and math.abs(enemy.j - node.j) <= 1 then
+                                enemy.isStunned = true
+                                enemy.stunTimer = 1.2
+                            end
+                        end
+                    end
+                end
+                self.echoPulseCooldown = 7
+            end
+            if self.echoPulseCooldown > 0 then
+                self.echoPulseCooldown = self.echoPulseCooldown - dt
+            end
+        end
+        -- Sprinter: Dash (SHIFT)
+        if self.character.name == "Sprinter" then
+            if not self.sprinterDashCooldown then self.sprinterDashCooldown = 0 end
+            if love.keyboard.isDown('lshift') and self.sprinterDashCooldown <= 0 then
+                -- self.speed = (self.character.speed or 3.2) * 2.2
+                self.sprinterDashTimer = 0.5
+                self.sprinterDashCooldown = 5
+            end
+            if self.sprinterDashTimer and self.sprinterDashTimer > 0 then
+                self.sprinterDashTimer = self.sprinterDashTimer - dt
+                if self.sprinterDashTimer <= 0 then
+                    self.speed = self.character.speed or 3.2
+                    self.sprinterDashTimer = nil
+                end
+            end
+            if self.sprinterDashCooldown > 0 then
+                self.sprinterDashCooldown = self.sprinterDashCooldown - dt
+            end
+        end
+        -- Scorer: No active, but double score for large closures (handled in game.lua)
     end
 
     self.moveTimer = self.moveTimer - dt
@@ -257,7 +371,7 @@ function Player:update(dt, grid)
                 self.tricksterDecoyTimer = self.character.decoyDuration
                 self.tricksterDecoyCooldownTimer = self.character.decoyCooldown
                 self.tricksterDecoyPosition = {i = self.i, j = self.j}
-                self.character.speed = self.originalSpeed * self.character.decoySpeedMultiplier -- Apply speed boost
+                -- self.character.speed = self.originalSpeed * self.character.decoySpeedMultiplier -- Apply speed boost
                 self.moveDelay = 0.15 / self.character.speed -- Recalculate moveDelay with new speed
                 print("Trickster decoy activated!")
             end
@@ -320,7 +434,11 @@ function Player:update(dt, grid)
                     else
                         print("Trail too short to close, clearing trail.")
                     end
-                    self.trail = {} -- Clear main trail, drawing will use the copy
+                    -- When trail is cleared (zone closed or stopped drawing), add to fadingTrails
+                    if not self.isDrawing and #self.trail > 1 then
+                        table.insert(self.fadingTrails, {trail=shallowcopy(self.trail), timer=0.7})
+                        self.trail = {}
+                    end
                 elseif not self.isDrawing and lineIsSafe then
                     -- Moving along a safe line, not drawing
                     self.trail = {} -- Ensure trail is clear
@@ -333,26 +451,34 @@ function Player:update(dt, grid)
             end
         end
     end
+
+    -- Update fading trails
+    for i = #self.fadingTrails, 1, -1 do
+        local t = self.fadingTrails[i]
+        t.timer = t.timer - dt
+        if t.timer <= 0 then table.remove(self.fadingTrails, i) end
+    end
 end
 
+---
+-- Draws the player, trail, and all visual effects.
+-- @param grid The grid object
 function Player:draw(grid)
-    local trailToDrawThisFrame = nil
-    if self.isDrawing and #self.trail >= 2 then
-        trailToDrawThisFrame = self.trail
-    elseif self.trailForDrawingLastClosure and #self.trailForDrawingLastClosure >= 2 then
-        trailToDrawThisFrame = self.trailForDrawingLastClosure
-    end
-    if trailToDrawThisFrame then
-        love.graphics.setColor(self.trailColor)
-        love.graphics.setLineWidth(3)
-        for k = 1, #trailToDrawThisFrame - 1 do
-            local p1_node = trailToDrawThisFrame[k]
-            local p2_node = trailToDrawThisFrame[k+1]
-            local x1, y1 = grid:getNodePixelPosition(p1_node.i, p1_node.j)
-            local x2, y2 = grid:getNodePixelPosition(p2_node.i, p2_node.j)
-            love.graphics.line(x1, y1, x2, y2)
+    -- Draw fading trails
+    for _, t in ipairs(self.fadingTrails) do
+        if #t.trail >= 2 then
+            local alpha = math.max(0, t.timer / 0.7)
+            love.graphics.setColor(self.trailColor[1], self.trailColor[2], self.trailColor[3], 0.25 * alpha)
+            love.graphics.setLineWidth(3)
+            for k = 1, #t.trail - 1 do
+                local p1_node = t.trail[k]
+                local p2_node = t.trail[k+1]
+                local x1, y1 = grid:getNodePixelPosition(p1_node.i, p1_node.j)
+                local x2, y2 = grid:getNodePixelPosition(p2_node.i, p2_node.j)
+                love.graphics.line(x1, y1, x2, y2)
+            end
+            love.graphics.setLineWidth(1)
         end
-        love.graphics.setLineWidth(1)
     end
     if self.trailForDrawingLastClosure then self.trailForDrawingLastClosure = nil end
 
@@ -502,9 +628,62 @@ function Player:draw(grid)
         love.graphics.setFont(love.graphics.newFont(14))
         love.graphics.printf("JAM", px-grid.cellSize*0.18, py-grid.cellSize*0.65, grid.cellSize*0.36, 'center')
     end
+
+    -- Draw floating text for powerup pickup
+    if self.lastPowerupText and self.lastPowerupTextTimer and self.lastPowerupTextTimer > 0 then
+        local text = self.lastPowerupText
+        local font = love.graphics.newFont(14)
+        love.graphics.setFont(font)
+        love.graphics.setColor(1, 1, 0, 1)
+        love.graphics.printf(text, px - grid.cellSize, py - grid.cellSize * 1.5, grid.cellSize * 2, 'center')
+        love.graphics.setColor(1, 1, 1, 1)
+    end
+
+    -- Draw fuse burn flash if active
+    if self.fuseBurnFlash and self.fuseBurnFlash > 0 then
+        love.graphics.setColor(1,0.2,0.1,0.5 * self.fuseBurnFlash)
+        love.graphics.rectangle('fill', 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+        love.graphics.setColor(1,1,1)
+        self.fuseBurnFlash = self.fuseBurnFlash - (love.timer.getDelta() or 0.016)
+        if self.fuseBurnFlash < 0 then self.fuseBurnFlash = 0 end
+    end
+
+    -- Draw ability activation flash (newly added)
+    if self._abilityFlashTimer and self._abilityFlashTimer > 0 then
+        local alpha = math.min(1, self._abilityFlashTimer / 0.35)
+        love.graphics.setColor(1, 1, 0.3, 0.45 * alpha)
+        love.graphics.circle('fill', px, py, cs*0.38 + 12*alpha, 32)
+        love.graphics.setColor(1,1,1,1)
+    end
 end
 
--- Helper function for shallow copying a table (array part)
+---
+-- Returns the player's current speed, factoring in all modifiers.
+function Player:getCurrentSpeed()
+    local base = self.character and self.character.speed or 2.0
+    local speed = base
+    -- Jammed effect
+    if self.isJammed then
+        speed = speed * 0.6
+    end
+    -- Speed boost powerup
+    if self.speedBoostTimer and self.speedBoostTimer > 0 then
+        speed = speed * 1.5
+    end
+    -- Trickster decoy
+    if self.tricksterDecoyActive then
+        speed = speed * (self.character.decoySpeedMultiplier or 1.25)
+    end
+    -- Sprinter dash
+    if self.sprinterDashTimer and self.sprinterDashTimer > 0 then
+        speed = speed * 2.2
+    end
+    return speed
+end
+
+---
+-- Helper function for shallow copying a table (array part).
+-- @param orig The original table
 function shallowcopy(orig)
     local orig_type = type(orig)
     local copy
@@ -518,5 +697,52 @@ function shallowcopy(orig)
     end
     return copy
 end
+
+---
+-- Handles powerup collection and floating text feedback.
+-- @param powerup The powerup object
+function Player:collectPowerup(powerup)
+    if powerup and not powerup.collected then
+        powerup:apply(self)
+        powerup.collected = true
+        self.lastPowerupText = powerup.name or "Powerup!"
+        self.lastPowerupTextTimer = 1.2
+    end
+end
+
+function Player:move(dx, dy, grid)
+    local new_i = self.i + dx
+    local new_j = self.j + dy
+    -- Enforce player stays only on outer border when on border
+    if (new_i == 1 or new_i == grid.width or new_j == 1 or new_j == grid.height) then
+        self.i = new_i
+        self.j = new_j
+    else
+        -- If player is on inner border, push to outer
+        if new_i == 2 then self.i = 1 end
+        if new_i == grid.width-1 then self.i = grid.width end
+        if new_j == 2 then self.j = 1 end
+        if new_j == grid.height-1 then self.j = grid.height end
+    end
+end
+
+function Player:activateAbility(...)
+    self.abilitiesUsed = (self.abilitiesUsed or 0) + 1
+    local Sound = require('src.utils.sound')
+    Sound.play('ability')
+    self._abilityFlashTimer = 0.35
+    -- ...existing code for ability activation...
+end
+
+--[[
+CHARACTER-SPECIFIC LOGIC:
+- Trickster: Decoy, Swap, Stun on reverse
+- Architect: Trail persistence
+- Guardian: Fuse shield, defuse
+- Echo: Trail pulse
+- Sprinter: Dash
+- Scorer: Large closure bonus
+Consider refactoring these into per-character modules for maintainability.
+]]
 
 return Player

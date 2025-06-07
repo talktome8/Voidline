@@ -124,6 +124,19 @@
 
 ---
 
+## 💡 Commercial & Polish Recommendations
+
+- Focus on single-player experience only (no multiplayer planned).
+- Invest in modern, polished UI/UX and beautiful animations for all menus, transitions, and gameplay.
+- Add adaptive music and high-quality sound effects for immersion and feedback.
+- Expand achievements, unlocks, and meta-progression to increase replay value.
+- Provide a free demo version, then offer a paid full version with extra content.
+- Prepare a trailer and screenshots for store pages (Steam, itch.io, etc).
+- Playtest for difficulty balance, fun factor, and accessibility.
+- Prioritize smooth transitions, visual feedback, and a rewarding end-of-run stats screen.
+
+---
+
 ## 🤝 Contribution
 
 Follow the TODO file for phase breakdown. Branches by feature/module.

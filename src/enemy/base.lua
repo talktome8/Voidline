@@ -37,6 +37,13 @@ function EnemyBase:hitByFuse()
 end
 
 function EnemyBase:update(dt, grid, player)
+    -- ABSOLUTE BLOCK: If forced slow is set and moveDelay >= 900 or speed < 0.01, do not move at all
+    if (self._forcedSlow and (self.moveDelay and self.moveDelay >= 900 or self.speed and self.speed < 0.01)) then
+        print('ENEMYBASE BLOCKED:', self.type, 'moveDelay:', self.moveDelay, 'speed:', self.speed)
+        return true -- Block all movement
+    end
+    -- DEBUG: Print type and moveDelay every frame for all enemies
+    print('ENEMYBASE UPDATE:', self.type, 'moveDelay:', self.moveDelay, 'speed:', self.speed)
     local actualSpeed = self.speed or 1
     if self.speedBoost then
         actualSpeed = actualSpeed * self.speedBoost
@@ -82,4 +89,49 @@ function EnemyBase:draw(grid)
     love.graphics.setColor(1,1,1)
 end
 
-return EnemyBase
+-- Infester enemy: infects claimed zones, can only be removed by closure
+local Infester = setmetatable({}, {__index = EnemyBase})
+Infester.__index = Infester
+
+function Infester:new(i, j, level)
+    local e = EnemyBase.new(self, i, j)
+    e.type = 'infester'
+    e.moveDelay = 1.5
+    e.moveTimer = 0
+    e.level = level or 1
+    e.infectTimer = 0
+    return e
+end
+
+function Infester:update(dt, grid, player)
+    self.moveTimer = self.moveTimer - dt
+    if self.moveTimer > 0 then return end
+    self.moveTimer = self.moveDelay
+    -- Infect claimed zones
+    if grid.cells[self.i] and grid.cells[self.i][self.j] == 'claimed' then
+        grid.cells[self.i][self.j] = 'infected'
+    end
+    -- Move randomly inside claimed or infected zones
+    local dirs = {{1,0},{-1,0},{0,1},{0,-1}}
+    local moves = {}
+    for _, d in ipairs(dirs) do
+        local ni, nj = self.i + d[1], self.j + d[2]
+        if grid:isInside(ni, nj) and (grid.cells[ni][nj] == 'claimed' or grid.cells[ni][nj] == 'infected') then
+            table.insert(moves, {ni, nj})
+        end
+    end
+    if #moves > 0 then
+        local idx = math.random(1, #moves)
+        self.i, self.j = moves[idx][1], moves[idx][2]
+    end
+end
+
+function Infester:draw(grid)
+    local x = grid.offsetX + (self.i-0.5)*grid.cellSize
+    local y = grid.offsetY + (self.j-0.5)*grid.cellSize
+    love.graphics.setColor(0.3, 1, 0.3, 1)
+    love.graphics.circle('fill', x, y, grid.cellSize*0.28)
+    love.graphics.setColor(1,1,1)
+end
+
+return EnemyBase, Infester

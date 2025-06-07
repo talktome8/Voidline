@@ -1,3 +1,7 @@
+-- src/characters/trickster.lua
+-- Defines the Trickster character: passives, stats, and ability stubs.
+-- Each character can define characterStageModifier(stage, player, grid) to add unique challenges or bonuses in specific realms/stages.
+
 local Trickster = {}
 
 Trickster.name = "Trickster"
@@ -32,6 +36,25 @@ function Trickster:update(dt)
 end
 
 function Trickster:draw()
+end
+
+function Trickster:applyPassive(player)
+    -- Enemies react slower (could be implemented as a global enemy delay modifier)
+    player.enemyReactionDelay = 0.2
+    -- Mini-stun on direction change (handled in enemy logic)
+    player.tricksterStunOnReverse = true
+end
+
+function Trickster:activateAbility(player, grid)
+    -- Decoy Swap logic handled in player.lua
+end
+
+function Trickster:characterStageModifier(stage, player, grid)
+    -- In "Echo Lab", Trickster faces more decoys
+    if stage and stage.name and stage.name:find("Echo Lab") then
+        player.extraDecoys = true
+    end
+    -- Add more unique stage/realm effects here
 end
 
 return Trickster
