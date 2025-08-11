@@ -1,7 +1,7 @@
--- src/systems/shape_feedback.lua
 -- Visual feedback system for shape drawing with color changes and stars
 
 local ShapeFeedback = {}
+local ok_cfg, Config = pcall(require, 'src.config')
 
 function ShapeFeedback:init()
     self.isInitialized = true
@@ -44,6 +44,14 @@ function ShapeFeedback:init()
         duration = 1.5,
         pulseIntensity = 0
     }
+
+    -- Cache fonts (avoid recreating every frame)
+    local baseSize = 14
+    local fontSize = baseSize
+    if ok_cfg and Config.getFontSize then
+        fontSize = Config:getFontSize(baseSize)
+    end
+    self.fontSmall = love.graphics.newFont(fontSize)
 end
 
 -- Update feedback animations
@@ -175,8 +183,10 @@ function ShapeFeedback:drawShapeTemplate(template, x, y, scale)
     
     -- Draw shape name
     love.graphics.setColor(1, 1, 1, 1)
-    love.graphics.setFont(love.graphics.newFont(14))
+    local prevFont = love.graphics.getFont()
+    if self.fontSmall then love.graphics.setFont(self.fontSmall) end
     love.graphics.printf(template.name or "Shape", x, y + panelHeight + 5, panelWidth, 'center')
+    if prevFont then love.graphics.setFont(prevFont) end
     
     love.graphics.setLineWidth(1) -- Reset line width
 end

@@ -344,12 +344,19 @@ function Game:updateEnemy(enemy, dt)
             end
         end
         
-        -- Move enemy
+        -- Move enemy with small telegraph (store last position and fade timer)
         if chosenDir then
+            enemy.prevI, enemy.prevJ = enemy.i, enemy.j
+            enemy.telegraphTimer = 0.15
             enemy.i = enemy.i + chosenDir.x
             enemy.j = enemy.j + chosenDir.y
             enemy.lastDirection = chosenDir
         end
+    end
+    -- Decay telegraph timer
+    if enemy.telegraphTimer then
+        enemy.telegraphTimer = enemy.telegraphTimer - dt
+        if enemy.telegraphTimer <= 0 then enemy.telegraphTimer = nil end
     end
 end
 
@@ -717,6 +724,16 @@ function Game:draw()
     for _, enemy in ipairs(Enemies) do
         local x = Grid.offsetX + (enemy.i - 1) * Grid.cellSize + Grid.cellSize/2
         local y = Grid.offsetY + (enemy.j - 1) * Grid.cellSize + Grid.cellSize/2
+        -- Telegraph: draw a faint line from previous to current position
+        if enemy.prevI and enemy.prevJ and enemy.telegraphTimer then
+            local px = Grid.offsetX + (enemy.prevI - 1) * Grid.cellSize + Grid.cellSize/2
+            local py = Grid.offsetY + (enemy.prevJ - 1) * Grid.cellSize + Grid.cellSize/2
+            local alpha = math.max(0, math.min(1, enemy.telegraphTimer / 0.15)) * 0.5
+            love.graphics.setColor(1, 1, 1, alpha)
+            love.graphics.setLineWidth(2)
+            love.graphics.line(px, py, x, y)
+            love.graphics.setLineWidth(1)
+        end
         if enemy.isBoss then
             love.graphics.setColor(0.7, 0.2, 1.0, 1)
             love.graphics.circle("fill", x, y, math.max(6, Grid.cellSize * 0.45))
@@ -878,6 +895,20 @@ function Game:keypressed(key)
     if key == "escape" then
         local Menu = require 'src.ui.menu'
         Gamestate.switch(Menu)
+    elseif key == "f3" then
+        -- Runtime debug toggle
+        if ok_cfg and Config.debug then
+            Config.debug.enabled = not Config.debug.enabled
+            local msg = Config.debug.enabled and "Debug: ON" or "Debug: OFF"
+            -- Brief on-screen toast
+            love.graphics.setColor(0,0,0,0.6)
+            love.graphics.rectangle('fill', 10, 10, 130, 28, 6, 6)
+            love.graphics.setColor(1,1,1,1)
+            local prev = love.graphics.getFont()
+            love.graphics.setFont(love.graphics.newFont(14))
+            love.graphics.print(msg, 18, 16)
+            if prev then love.graphics.setFont(prev) end
+        end
     elseif key == "r" and gameOver then
         level = 1
         score = 0
