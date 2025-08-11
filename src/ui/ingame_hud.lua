@@ -42,17 +42,19 @@ function IngameHUD:draw(game, player, grid, powerups, unlockMessage)
         love.graphics.setColor(1,1,1)
     end
 
-    -- Draw claimed percent, required percent, and level (top center)
-    local percent = math.floor(grid:getClaimedPercent()*100)
-    local req = math.floor(grid.requiredClaimedPercent*100)
-    local level = game.level or 1
-    love.graphics.setFont(love.graphics.newFont(16))
-    love.graphics.setColor(0.13,0.13,0.18,0.85)
-    love.graphics.rectangle('fill', love.graphics.getWidth()/2-90, 10, 180, 36, 8, 8)
-    love.graphics.setColor(1,1,1)
-    love.graphics.printf('Level '..level..'   Claimed: '..percent..'/'..req..'%', love.graphics.getWidth()/2-90, 18, 180, 'center')
-    love.graphics.setFont(love.graphics.newFont(14))
-    love.graphics.setColor(1,1,1)
+    -- Draw claimed/required/level (top center) unless minimal HUD is enabled
+    if not (game and game.minimalHUD) then
+        local percent = math.floor((grid:getClaimedPercent() or 0)*100)
+        local req = math.floor(((grid.requiredClaimedPercent or 0)*100))
+        local level = game.level or 1
+        love.graphics.setFont(love.graphics.newFont(16))
+        love.graphics.setColor(0.13,0.13,0.18,0.85)
+        love.graphics.rectangle('fill', love.graphics.getWidth()/2-90, 10, 180, 36, 8, 8)
+        love.graphics.setColor(1,1,1)
+        love.graphics.printf('Level '..level..'   Claimed: '..percent..'/'..req..'%', love.graphics.getWidth()/2-90, 18, 180, 'center')
+        love.graphics.setFont(love.graphics.newFont(14))
+        love.graphics.setColor(1,1,1)
+    end
 
     -- Draw unlock message if present
     if unlockMessage then
@@ -62,20 +64,22 @@ function IngameHUD:draw(game, player, grid, powerups, unlockMessage)
         love.graphics.setColor(1,1,1)
     end
 
-    -- Draw infected zone indicator if any infected cells exist
-    local infectedCount = 0
-    for i=1,grid.width do
-        for j=1,grid.height do
-            if grid.cells[i] and grid.cells[i][j] == 'infected' then
-                infectedCount = infectedCount + 1
+    -- Optional infected zone indicator (hidden in minimal HUD)
+    if not (game and game.minimalHUD) then
+        local infectedCount = 0
+        for i=1,grid.width do
+            for j=1,grid.height do
+                if grid.cells[i] and grid.cells[i][j] == 'infected' then
+                    infectedCount = infectedCount + 1
+                end
             end
         end
-    end
-    if infectedCount > 0 then
-        love.graphics.setFont(love.graphics.newFont(14))
-        love.graphics.setColor(1,0.3,0.3,0.9)
-        love.graphics.printf('Infected Zones: '..infectedCount, love.graphics.getWidth()/2-90, 50, 180, 'center')
-        love.graphics.setColor(1,1,1)
+        if infectedCount > 0 then
+            love.graphics.setFont(love.graphics.newFont(14))
+            love.graphics.setColor(1,0.3,0.3,0.9)
+            love.graphics.printf('Infected Zones: '..infectedCount, love.graphics.getWidth()/2-90, 50, 180, 'center')
+            love.graphics.setColor(1,1,1)
+        end
     end
 
     -- Draw ability bar for current character (if any active ability)
@@ -100,8 +104,8 @@ function IngameHUD:draw(game, player, grid, powerups, unlockMessage)
     -- Draw failed closure warning if present
     if player.failedClosureWarning and player.failedClosureWarning > 0 then
         love.graphics.setFont(love.graphics.newFont(22))
-        love.graphics.setColor(1,0.2,0.2,player.failedClosureWarning)
-        love.graphics.printf('Cannot close area: Enemy inside!', 0, love.graphics.getHeight()/2-60, love.graphics.getWidth(), 'center')
+        love.graphics.setColor(1,0.2,0.2,math.min(1, player.failedClosureWarning))
+        love.graphics.printf('Finish on safe area (border or claimed) to complete!', 0, love.graphics.getHeight()/2-60, love.graphics.getWidth(), 'center')
         love.graphics.setColor(1,1,1)
         player.failedClosureWarning = player.failedClosureWarning - (love.timer.getDelta() or 0.016)
         if player.failedClosureWarning < 0 then player.failedClosureWarning = 0 end

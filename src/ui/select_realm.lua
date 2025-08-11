@@ -49,11 +49,9 @@ end
 function SelectRealm:enter()
     self:init()
     self.selectedCharacter = _G.selectedCharacter or nil
-    print('DEBUG: SelectRealm:enter - selectedCharacter from _G:', self.selectedCharacter and self.selectedCharacter.name or 'NIL', tostring(self.selectedCharacter))
     if self.selectedCharacter then
         local Game = require 'src.game'
         Game:selectCharacter(self.selectedCharacter)
-        print('DEBUG: SelectRealm:enter - _G.selectedCharacter:', _G.selectedCharacter and _G.selectedCharacter.name or 'NIL', tostring(_G.selectedCharacter))
     end
 end
 
@@ -74,7 +72,6 @@ function SelectRealm:update(dt)
         elseif love.keyboard.isDown('return') or love.keyboard.isDown('space') then
             if self.realms[self.selectedIdx] then
                 local Game = require 'src.game'
-                print('DEBUG: SelectRealm:update - passing self.selectedCharacter to Game:', self.selectedCharacter and self.selectedCharacter.name or 'NIL', tostring(self.selectedCharacter))
                 if self.selectedCharacter then
                     Game:selectCharacter(self.selectedCharacter)
                 end
@@ -103,7 +100,6 @@ function SelectRealm:keypressed(key)
         if #self.realms > 0 then
             if self.realms[self.selectedIdx] then
                 local Game = require 'src.game'
-                print('DEBUG: SelectRealm:keypressed - passing self.selectedCharacter to Game:', self.selectedCharacter and self.selectedCharacter.name or 'NIL', tostring(self.selectedCharacter))
                 if self.selectedCharacter then
                     Game:selectCharacter(self.selectedCharacter)
                 end

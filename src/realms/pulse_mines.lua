@@ -20,7 +20,7 @@ function PulseMines:update(dt, Grid, Player)
             Player.fuseTimer = Player.fuseDuration
             Player.burningTrail = nil -- No trail, just instant fuse
             Player.fuseHitSegmentIndex = nil
-            -- TODO: add sound/visual feedback for mine
+            -- Add sound/visual feedback for mine
         end
     end
     -- Update logic for Pulse Mines

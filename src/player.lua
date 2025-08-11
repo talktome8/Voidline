@@ -4,6 +4,7 @@
 local love = require "love" -- Added missing love require
 local Player = {}
 local Gamestate = require 'hump.gamestate' -- For accessing game state
+local Grid = require('src.grid')
 
 local function getCharacterByName(name)
     local characters = require('src.characters.init')
@@ -18,10 +19,7 @@ end
 -- @param grid The grid object
 -- @param character The character table (optional)
 function Player:load(grid, character)
-    print('DEBUG: Player:load called with character:', character and character.name or 'NIL', tostring(character))
-    if character then
-        for k,v in pairs(character) do print('DEBUG: Player:load character['..tostring(k)..']='..tostring(v)) end
-    end
+    -- Initialize player with given character
     -- Player position is now node-based. Nodes are 1 to grid.nodeWidth and 1 to grid.nodeHeight
     self.i = 1 -- Start on the first column of nodes (left border)
     self.j = math.floor(grid.nodeHeight / 2) -- Start at a middle node vertically
@@ -30,17 +28,13 @@ function Player:load(grid, character)
     if not character then
         if _G.selectedCharacter then
             character = getCharacterByName(_G.selectedCharacter.name)
-            print('DEBUG: Player:load fallback to _G.selectedCharacter:', character.name, tostring(character))
         else
             character = getCharacterByName("Architect")
-            print('DEBUG: Player:load fallback to Architect (default)', tostring(character))
         end
     else
         character = getCharacterByName(character.name)
-        print('DEBUG: Player:load normalized to canonical object:', character.name, tostring(character))
     end
     self.character = character
-    print('DEBUG: Player.character set to:', self.character and self.character.name or 'NIL', tostring(self.character))
     self.moveDelay = 0.15 / (self.character.speed or 2.0) 
     self.moveTimer = 0 -- Ensure moveTimer is initialized
     self.dir = {x=0, y=0}
@@ -137,7 +131,7 @@ function Player:update(dt, grid)
                 self.tricksterDecoyPosition = nil
                 self.character.speed = self.originalSpeed -- Restore speed
                 -- Invisibility is handled in draw, but reset state here if needed
-                print("Trickster decoy expired")
+                do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then print("Trickster decoy expired") end end
             end
         end
     end
@@ -205,9 +199,10 @@ function Player:update(dt, grid)
                 -- פיוז נגמר: אם השחקן לא חזר לשטח, מוות
                 self.isFuseActive = false
                 self.fuseTimer = 0
-                local game = require('src.game')
-                if game and game.gameOver ~= nil then
-                    game.gameOver = true
+                -- Use Gamestate instead of circular dependency
+                local currentGame = Gamestate.current()
+                if currentGame and currentGame.handleGameOver then
+                    currentGame:handleGameOver()
                 end
                 self.fuseBurnFlash = 0.5
                 if love.audio and self.fuseBurnSound then
@@ -292,9 +287,9 @@ function Player:update(dt, grid)
                 self.tricksterDecoyCooldownTimer = self.tricksterDecoyCooldownTimer - dt
             end
         end
-        -- Guardian: Defuse fuse once per run (D)
+        -- Guardian: Defuse fuse once per run (F key to avoid WASD conflict)
         if self.character.name == "Guardian" then
-            if not self.fuseDefused and love.keyboard.isDown('d') and self.isFuseActive then
+            if not self.fuseDefused and love.keyboard.isDown('f') and self.isFuseActive then
                 self.isFuseActive = false
                 self.fuseTimer = 0
                 self.fuseDefused = true
@@ -345,118 +340,226 @@ function Player:update(dt, grid)
 
     self.moveTimer = self.moveTimer - dt
     if self.moveTimer <= 0 then
-        -- Determine input direction
+        -- Determine input direction (keyboard first; touch optional)
         local input_dx, input_dy = 0, 0
-        if love.keyboard.isDown('left') then input_dx = -1 end
-        if love.keyboard.isDown('right') then input_dx = 1 end -- Changed elseif to if
-        if love.keyboard.isDown('up') then input_dy = -1 end
-        if love.keyboard.isDown('down') then input_dy = 1 end -- Changed elseif to if
+        if love.keyboard.isDown('left') or love.keyboard.isDown('a') then input_dx = -1 end
+        if love.keyboard.isDown('right') or love.keyboard.isDown('d') then input_dx = 1 end
+        if love.keyboard.isDown('up') or love.keyboard.isDown('w') then input_dy = -1 end
+        if love.keyboard.isDown('down') or love.keyboard.isDown('s') then input_dy = 1 end
+
+        -- Basic touch steering: move toward first touch (nearest axis)
+        if input_dx == 0 and input_dy == 0 and love.touch and love.touch.getTouches then
+            local touches = love.touch.getTouches()
+            if touches and #touches > 0 then
+                local tx, ty = love.touch.getPosition(touches[1])
+                -- Player center in pixels
+                local px = grid.offsetX + (self.i - 1) * grid.cellSize + grid.cellSize/2
+                local py = grid.offsetY + (self.j - 1) * grid.cellSize + grid.cellSize/2
+                local dx = tx - px
+                local dy = ty - py
+                if math.abs(dx) > math.abs(dy) then
+                    input_dx = (dx > 0) and 1 or -1
+                else
+                    input_dy = (dy > 0) and 1 or -1
+                end
+            end
+        end
 
         local dx_node, dy_node = 0, 0
         local moved = false
 
-        -- Allow diagonal movement
+        -- Allow diagonal movement but prefer orthogonal for trail drawing
         if input_dx ~= 0 or input_dy ~= 0 then
             dx_node = input_dx
             dy_node = input_dy
             moved = true
-        end
-        -- Now, moved is true if there was any input.
-        -- dx_node and dy_node can both be non-zero for diagonal movement.
-
-        -- Trickster Decoy Activation
-        if self.character and self.character.name == "Trickster" and love.keyboard.isDown('space') then
-            if not self.tricksterDecoyActive and self.tricksterDecoyCooldownTimer <= 0 then
-                self.tricksterDecoyActive = true
-                self.tricksterDecoyTimer = self.character.decoyDuration
-                self.tricksterDecoyCooldownTimer = self.character.decoyCooldown
-                self.tricksterDecoyPosition = {i = self.i, j = self.j}
-                -- self.character.speed = self.originalSpeed * self.character.decoySpeedMultiplier -- Apply speed boost
-                self.moveDelay = 0.15 / self.character.speed -- Recalculate moveDelay with new speed
-                print("Trickster decoy activated!")
-            end
-        end
-
-        if self.character and self.character.name == "Architect" and not moved and self.isDrawing and #self.trail > 0 then
-            -- Architect stopped moving while drawing, activate trail persistence
-            if self.architectTrailPersistTimer <= 0 then -- Only activate if not already persisting
-                self.architectTrailPersistTimer = self.character.trailPersistDuration
-                self.architectLastTrailCells = shallowcopy(self.trail) -- Store current trail for persistence
-                -- print("Architect trail persistence activated")
-            end
-            -- Player does not move, but trail persists for a bit
-            -- We don't return here, to allow other logic like drawing to proceed if needed.
         end
 
         if moved then
             local prev_node_i, prev_node_j = self.i, self.j
             local next_node_i, next_node_j = self.i + dx_node, self.j + dy_node
 
-            -- DEBUG: Check grid object and its methods
-            print("Player:update - grid type:", type(grid))
-            if type(grid) == "table" then
-                print("Player:update - grid.isNodeValid type:", type(grid.isNodeValid))
-                print("Player:update - grid.isLineSafe type:", type(grid.isLineSafe))
+            -- Clamp movement to playable node area
+            local function clampNode(i, j)
+                i = math.max(1, math.min(grid.nodeWidth, i))
+                j = math.max(1, math.min(grid.nodeHeight, j))
+                return i, j
             end
+            next_node_i, next_node_j = clampNode(next_node_i, next_node_j)
 
-            if grid:isNodeValid(next_node_i, next_node_j) then
-                local lineIsSafe = grid:isLineSafe(prev_node_i, prev_node_j, next_node_i, next_node_j)
+            -- Bounds checking
+            if next_node_i >= 1 and next_node_i <= grid.nodeWidth and 
+               next_node_j >= 1 and next_node_j <= grid.nodeHeight then
+                
+                -- Check if moving into claimed territory or borders
+                local onClaimedTerritory = false
+                local onBorder = (next_node_i == 1 or next_node_i == grid.nodeWidth or 
+                                 next_node_j == 1 or next_node_j == grid.nodeHeight)
+                
+                -- Convert node position to cell position for territory checking
+                local cellI = math.min(next_node_i, grid.width)
+                local cellJ = math.min(next_node_j, grid.height)
+                if grid.cells[cellI] and grid.cells[cellI][cellJ] then
+                    onClaimedTerritory = (grid.cells[cellI][cellJ] == 'claimed')
+                end
+                
+                local lineIsSafe = onBorder or onClaimedTerritory
 
                 if not self.isDrawing and not lineIsSafe then
                     -- Start drawing a new trail
                     self.isDrawing = true
                     self.trail = { {i=prev_node_i, j=prev_node_j}, {i=next_node_i, j=next_node_j} }
-                    -- No direct grid cell marking for trail yet with node system
-                    print("Player started drawing trail from node ("..prev_node_i..","..prev_node_j..") to ("..next_node_i..","..next_node_j..")")
+                    
+                    -- Mark cells as trail for visual feedback
+                    self:markTrailCells(grid)
+                    
+                    -- ✅ START DrawPath pipeline via Game state's instance (pixel coords)
+                    local game = Gamestate.current()
+                    if game and game.drawPath and game.drawPath.startPath then
+                        local pixelX = grid.offsetX + (prev_node_i - 1) * grid.cellSize + grid.cellSize/2
+                        local pixelY = grid.offsetY + (prev_node_j - 1) * grid.cellSize + grid.cellSize/2
+                        game.drawPath:startPath(pixelX, pixelY)
+                        local nextPixelX = grid.offsetX + (next_node_i - 1) * grid.cellSize + grid.cellSize/2
+                        local nextPixelY = grid.offsetY + (next_node_j - 1) * grid.cellSize + grid.cellSize/2
+                        game.drawPath:addPoint(nextPixelX, nextPixelY)
+                    end
+                    
+                    local ok, Config = pcall(require, 'src.config')
+                    if ok and Config.debug and Config.debug.enabled then print("Player started drawing trail") end
                 elseif self.isDrawing and not lineIsSafe then
                     -- Continue drawing
                     table.insert(self.trail, {i=next_node_i, j=next_node_j})
-                    -- No direct grid cell marking
-                    print("Player continued trail to node ("..next_node_i..","..next_node_j..")")
+                    
+                    -- Update trail marking
+                    self:markTrailCells(grid)
+                    
+                    -- ✅ ADD to DrawPath instance
+                    local game = Gamestate.current()
+                    if game and game.drawPath and game.drawPath.addPoint then
+                        local pixelX = grid.offsetX + (next_node_i - 1) * grid.cellSize + grid.cellSize/2
+                        local pixelY = grid.offsetY + (next_node_j - 1) * grid.cellSize + grid.cellSize/2
+                        game.drawPath:addPoint(pixelX, pixelY)
+                    end
+                    
+                    local ok2, Config2 = pcall(require, 'src.config')
+                    if ok2 and Config2.debug and Config2.debug.enabled then print("Player continued trail") end
                 elseif self.isDrawing and lineIsSafe then
-                    -- Reached a safe line, attempt to close area
+                    -- Reached a safe area, attempt to close
+                    table.insert(self.trail, {i=next_node_i, j=next_node_j})
+                    
+                    -- ✅ FINISH DrawPath instance
+                    local game = Gamestate.current()
+                    if game and game.drawPath and game.drawPath.finishPath then
+                        local pixelX = grid.offsetX + (next_node_i - 1) * grid.cellSize + grid.cellSize/2
+                        local pixelY = grid.offsetY + (next_node_j - 1) * grid.cellSize + grid.cellSize/2
+                        game.drawPath:addPoint(pixelX, pixelY)
+                        local drawData = game.drawPath:finishPath()
+                        -- Evaluate shape on closure
+                        if drawData and game.evaluateShapeDrawing then
+                            game:evaluateShapeDrawing(drawData)
+                        end
+                    end
+                    
+                    local ok3, Config3 = pcall(require, 'src.config')
+                    if ok3 and Config3.debug and Config3.debug.enabled then print("Attempting to close trail with", #self.trail, "points") end
+                    
+                    -- Convert node trail to cell trail for closing
+                    local cellTrail = self:convertNodeTrailToCells()
+                    if #cellTrail >= 3 then
+                        local newlyClaimedCells = grid:closeArea(cellTrail)
+                        do local ok4, Config4 = pcall(require, 'src.config'); if ok4 and Config4.debug and Config4.debug.enabled then print("Closed area with", newlyClaimedCells, "new cells") end end
+                        
+                        -- ENHANCED SHAPE SUCCESS FEEDBACK with clearer validation
+                        if _G.currentGame and newlyClaimedCells > 5 then  -- Lower threshold for better response
+                            local territoryPercent = _G.currentGame:calculateTerritoryPercentage()
+                            local shapeChallenge = _G.currentGame.shapeChallenge or {}
+                            local territoryComplete = territoryPercent >= 75
+                            local shapeAccuracy = shapeChallenge.currentAccuracy or 0
+                            local shapeComplete = (shapeChallenge.active == true) and (shapeAccuracy >= 80)
+                            
+                            -- Show progress feedback for ANY meaningful area capture
+                            do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then
+                                if shapeAccuracy >= 60 then
+                                    print("Good shape! Accuracy:", math.floor(shapeAccuracy), "% (need 80%)")
+                                elseif shapeAccuracy >= 30 then
+                                    print("Shape detected but needs improvement. Accuracy:", math.floor(shapeAccuracy), "%")
+                                else
+                                    print("Try drawing a more square-like shape. Current accuracy:", math.floor(shapeAccuracy), "%")
+                                end
+                            end end
+                            
+                            -- Only show ultimate success when BOTH objectives are met
+                            if territoryComplete and shapeComplete then
+                                _G.currentGame._shapeJustCompleted = true
+                                _G.currentGame._shapeCompletionTimer = 3.0
+                                do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then print("VICTORY! Shape AND Territory objectives completed!") end end
+                            else
+                                do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then print("Progress - Area:", newlyClaimedCells, "cells | Territory:", math.floor(territoryPercent), "% | Shape:", math.floor(shapeAccuracy), "%") end end
+                            end
+                        end
+                    end
+                    
+                    -- Clear trail
+                    self:clearTrail(grid)
                     self.isDrawing = false
-                    self.attemptingClosure = true -- MODIFIED: Set flag for drawing this frame
-
-                    -- Make sure the last point is added to trail
-                    if #self.trail == 0 or not (self.trail[#self.trail].i == next_node_i and self.trail[#self.trail].j == next_node_j) then
-                        table.insert(self.trail, {i=next_node_i, j=next_node_j})
-                    end
-                    print("Player attempting to close trail at node ("..next_node_i..","..next_node_j.."). Trail length: " .. #self.trail)
-
-                    -- Save full trail for closure and drawing
-                    self.trailForDrawingLastClosure = shallowcopy(self.trail)
-
-                    if #self.trail >= 3 then -- Ensure trail is long enough to form an area
-                        local newlyClaimedCellCount = grid:closeAreaByNodes(self.trail, self)
-                        print("Grid:closeAreaByNodes claimed " .. newlyClaimedCellCount .. " cells.")
-                        -- TODO: Add scoring or other logic based on newlyClaimedCellCount
-                    else
-                        print("Trail too short to close, clearing trail.")
-                    end
-                    -- When trail is cleared (zone closed or stopped drawing), add to fadingTrails
-                    if not self.isDrawing and #self.trail > 1 then
-                        table.insert(self.fadingTrails, {trail=shallowcopy(self.trail), timer=0.7})
-                        self.trail = {}
-                    end
+                    
+                    -- DrawPath instance is finished by game; no global cleanup needed
                 elseif not self.isDrawing and lineIsSafe then
-                    -- Moving along a safe line, not drawing
-                    self.trail = {} -- Ensure trail is clear
+                    -- Moving in safe area, ensure no trail
+                    if #self.trail > 0 then
+                        self:clearTrail(grid)
+                    end
                 end
 
+                -- Move player
                 self.i, self.j = next_node_i, next_node_j
                 self.moveTimer = self.moveDelay
-                
-                -- ... (Architect trail persistence logic might need adjustment here too) ...
             end
         end
     end
 
     -- Update fading trails
+    self:updateFadingTrails(dt)
+end
+
+-- Helper function to mark trail cells in the grid (DISABLED to prevent blue dots)
+function Player:markTrailCells(grid)
+    -- Do nothing - let Player drawing system handle all trail visualization
+    -- This prevents the blue dots from appearing in the grid
+end
+
+-- Helper function to clear trail from grid
+function Player:clearTrail(grid)
+    -- Clear trail cells from grid
+    for i = 1, grid.width do
+        for j = 1, grid.height do
+            if grid.cells[i] and grid.cells[i][j] == 'trail' then
+                grid.cells[i][j] = 'empty'
+            end
+        end
+    end
+    self.trail = {}
+end
+
+-- Helper function to convert node trail to cell trail
+function Player:convertNodeTrailToCells()
+    local cellTrail = {}
+    for _, node in ipairs(self.trail) do
+        local cellI = math.min(node.i, Grid.width or 60)
+        local cellJ = math.min(node.j, Grid.height or 45)
+        table.insert(cellTrail, {i = cellI, j = cellJ})
+    end
+    return cellTrail
+end
+
+-- Update fading trails
+function Player:updateFadingTrails(dt)
     for i = #self.fadingTrails, 1, -1 do
         local t = self.fadingTrails[i]
         t.timer = t.timer - dt
-        if t.timer <= 0 then table.remove(self.fadingTrails, i) end
+        if t.timer <= 0 then 
+            table.remove(self.fadingTrails, i) 
+        end
     end
 end
 
@@ -480,6 +583,35 @@ function Player:draw(grid)
             love.graphics.setLineWidth(1)
         end
     end
+    
+    -- Draw CURRENT ACTIVE TRAIL while drawing (single unified trail)
+    if self.isDrawing and self.trail and #self.trail >= 2 then
+        -- Only draw ONE trail system - no duplicates
+        love.graphics.setColor(1, 1, 0.2, 0.9)  -- Bright yellow for active drawing
+        love.graphics.setLineWidth(4)
+        for k = 1, #self.trail - 1 do
+            local p1_node = self.trail[k]
+            local p2_node = self.trail[k+1]
+            local x1, y1 = grid:getNodePixelPosition(p1_node.i, p1_node.j)
+            local x2, y2 = grid:getNodePixelPosition(p2_node.i, p2_node.j)
+            love.graphics.line(x1, y1, x2, y2)
+        end
+        love.graphics.setLineWidth(1)
+        
+        -- Small trail dots only at key points to avoid clutter
+        love.graphics.setColor(1, 0.8, 0, 1)
+        local startNode = self.trail[1]
+        local endNode = self.trail[#self.trail]
+        if startNode then
+            local x, y = grid:getNodePixelPosition(startNode.i, startNode.j)
+            love.graphics.circle('fill', x, y, 4)  -- Start point
+        end
+        if endNode and #self.trail > 1 then
+            local x, y = grid:getNodePixelPosition(endNode.i, endNode.j)
+            love.graphics.circle('fill', x, y, 3)  -- End point
+        end
+    end
+    
     if self.trailForDrawingLastClosure then self.trailForDrawingLastClosure = nil end
 
     -- Draw Trickster's Decoy (משולש)
@@ -491,60 +623,45 @@ function Player:draw(grid)
         love.graphics.polygon('fill', x, y-18, x+16, y+14, x-16, y+14)
     end
 
-    -- Draw player (unique shape per character, תמיד!)
+    -- Draw player (unique shape per character - SINGLE REPRESENTATION ONLY)
     local px, py = grid:getNodePixelPosition(self.i, self.j)
     love.graphics.setColor(self.color)
     local cs = grid.cellSize
     if self.character and self.character.name then
-        -- DEBUG: Drawing character
-        -- Outline
-        love.graphics.setLineWidth(3)
+        -- Drawing character with outline for clarity
+        love.graphics.setLineWidth(2)
         if self.character.name == "Architect" then
-            -- Architect: blue rounded square with white border
+            -- Architect: blue rounded square with white border (SINGLE SHAPE)
             love.graphics.setColor(1,1,1,0.9)
-            love.graphics.rectangle('line', px-cs*0.22, py-cs*0.22, cs*0.44, cs*0.44, 10, 10)
-            love.graphics.setColor(0.1,0.5,1,0.7)
             love.graphics.rectangle('line', px-cs*0.20, py-cs*0.20, cs*0.40, cs*0.40, 8, 8)
             love.graphics.setColor(self.color)
             love.graphics.rectangle('fill', px-cs*0.18, py-cs*0.18, cs*0.36, cs*0.36, 6, 6)
         elseif self.character.name == "Trickster" then
-            -- Trickster: orange triangle with glow
+            -- Trickster: orange triangle (SINGLE SHAPE)
             love.graphics.setColor(1,0.7,0.2,0.7)
-            love.graphics.polygon('line', px, py-cs*0.24, px+cs*0.20, py+cs*0.18, px-cs*0.20, py+cs*0.18)
-            love.graphics.setColor(1,0.5,0.1,0.25)
-            love.graphics.circle('fill', px, py, cs*0.23)
+            love.graphics.polygon('line', px, py-cs*0.22, px+cs*0.18, py+cs*0.16, px-cs*0.18, py+cs*0.16)
             love.graphics.setColor(self.color)
-            love.graphics.polygon('fill', px, py-cs*0.22, px+cs*0.18, py+cs*0.16, px-cs*0.18, py+cs*0.16)
+            love.graphics.polygon('fill', px, py-cs*0.20, px+cs*0.16, py+cs*0.14, px-cs*0.16, py+cs*0.14)
         elseif self.character.name == "Echo" or self.character.name == "The Echo" then
-            -- Echo: purple circle with white highlight
+            -- Echo: purple circle with white outline (SINGLE SHAPE)
             love.graphics.setColor(1,1,1,0.7)
-            love.graphics.circle('line', px, py, cs*0.22)
-            love.graphics.setColor(0.7,0.5,1,0.7)
             love.graphics.circle('line', px, py, cs*0.20)
             love.graphics.setColor(self.color)
             love.graphics.circle('fill', px, py, cs*0.18)
         elseif self.character.name == "Sprinter" then
-            -- Sprinter: orange ellipse with speed lines
+            -- Sprinter: orange ellipse (SINGLE SHAPE)
             love.graphics.setColor(1,0.5,0.2,0.7)
-            love.graphics.ellipse('line', px, py, cs*0.22, cs*0.14)
+            love.graphics.ellipse('line', px, py, cs*0.20, cs*0.12)
             love.graphics.setColor(self.color)
-            love.graphics.ellipse('fill', px, py, cs*0.20, cs*0.12)
-            love.graphics.setColor(1,0.7,0.2,0.5)
-            love.graphics.line(px-cs*0.28, py, px-cs*0.12, py)
-            love.graphics.line(px+cs*0.12, py, px+cs*0.28, py)
+            love.graphics.ellipse('fill', px, py, cs*0.18, cs*0.10)
         elseif self.character.name == "Guardian" then
-            -- Guardian: blue double square with shield glow
+            -- Guardian: blue square (SINGLE SHAPE)
             love.graphics.setColor(0.2,0.7,1,0.7)
-            love.graphics.rectangle('line', px-cs*0.22, py-cs*0.22, cs*0.44, cs*0.44, 10, 10)
+            love.graphics.rectangle('line', px-cs*0.20, py-cs*0.20, cs*0.40, cs*0.40, 8, 8)
             love.graphics.setColor(self.color)
-            love.graphics.setLineWidth(4)
-            love.graphics.rectangle('line', px-cs*0.18, py-cs*0.18, cs*0.36, cs*0.36, 6, 6)
-            love.graphics.setLineWidth(1)
-            love.graphics.rectangle('fill', px-cs*0.13, py-cs*0.13, cs*0.26, cs*0.26, 6, 6)
-            love.graphics.setColor(0.2,0.7,1,0.18)
-            love.graphics.circle('fill', px, py, cs*0.30)
+            love.graphics.rectangle('fill', px-cs*0.18, py-cs*0.18, cs*0.36, cs*0.36, 6, 6)
         elseif self.character.name == "Scorer" then
-            -- Scorer: yellow star with white outline
+            -- Scorer: yellow star (SINGLE SHAPE)
             local function star(cx, cy, r, n)
                 local points = {}
                 for i=1, n*2 do
@@ -555,19 +672,18 @@ function Player:draw(grid)
                 end
                 love.graphics.setColor(1,1,1,0.8)
                 love.graphics.polygon('line', points)
-                love.graphics.setColor(1,1,0.3,0.7)
-                love.graphics.polygon('line', points)
                 love.graphics.setColor(self.color)
                 love.graphics.polygon('fill', points)
             end
-            star(px, py, cs*0.19, 5)
+            star(px, py, cs*0.18, 5)
         end
         love.graphics.setLineWidth(1)
     else
-        love.graphics.setColor(0.8,0.8,0.8,0.7)
-        love.graphics.circle('line', px, py, cs*0.27)
+        -- Fallback: simple circle (SINGLE SHAPE)
+        love.graphics.setColor(1,1,1,0.7)
+        love.graphics.circle('line', px, py, cs*0.20)
         love.graphics.setColor(self.color)
-        love.graphics.circle('fill', px, py, cs*0.25)
+        love.graphics.circle('fill', px, py, cs*0.18)
     end
     love.graphics.setColor(1,1,1)
 
@@ -648,13 +764,7 @@ function Player:draw(grid)
         if self.fuseBurnFlash < 0 then self.fuseBurnFlash = 0 end
     end
 
-    -- Draw ability activation flash (newly added)
-    if self._abilityFlashTimer and self._abilityFlashTimer > 0 then
-        local alpha = math.min(1, self._abilityFlashTimer / 0.35)
-        love.graphics.setColor(1, 1, 0.3, 0.45 * alpha)
-        love.graphics.circle('fill', px, py, cs*0.38 + 12*alpha, 32)
-        love.graphics.setColor(1,1,1,1)
-    end
+    -- NOTE: Removed redundant ability activation flash to prevent extra player dots
 end
 
 ---
@@ -744,5 +854,46 @@ CHARACTER-SPECIFIC LOGIC:
 - Scorer: Large closure bonus
 Consider refactoring these into per-character modules for maintainability.
 ]]
+
+---
+-- Cancels the current trail and resets player to safe state
+-- @param grid The grid object
+function Player:cancelTrail(grid)
+    if not self.isDrawing then return end
+    
+    -- Clear trail from grid
+    for _, trailNode in ipairs(self.trail) do
+        if grid.cells[trailNode.i] and grid.cells[trailNode.i][trailNode.j] == 'trail' then
+            grid.cells[trailNode.i][trailNode.j] = 'empty'
+        end
+    end
+    
+    -- Reset player state
+    self.trail = {}
+    self.isDrawing = false
+    self.trailForDrawingLastClosure = nil
+    
+    -- Move player back to a safe claimed area
+    local safeSpots = {}
+    for i = 2, grid.width - 1 do
+        for j = 2, grid.height - 1 do
+            if grid:isClaimed(i, j) then
+                table.insert(safeSpots, {i = i, j = j})
+            end
+        end
+    end
+    
+    if #safeSpots > 0 then
+        local safeSpot = safeSpots[math.random(1, #safeSpots)]
+        self.i = safeSpot.i
+        self.j = safeSpot.j
+    else
+        -- Fallback to border if no safe spots
+        self.i = 1
+        self.j = math.floor(grid.nodeHeight / 2)
+    end
+    
+    do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then print("Trail cancelled - player moved to safe position", self.i, self.j) end end
+end
 
 return Player

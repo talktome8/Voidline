@@ -31,16 +31,13 @@ function EndRun:enter(actualOutcome, actualStatsTable) -- Parameter names are as
         receivedOutcomeString = actualOutcome
         receivedStatsTable = actualStatsTable
     elseif type(actualOutcome) == "table" and type(actualStatsTable) == "string" then
-        -- Old bugged order
+        -- Handle parameter order variation
         receivedOutcomeString = actualStatsTable
         receivedStatsTable = actualOutcome
     else
         receivedOutcomeString = tostring(actualOutcome)
         receivedStatsTable = actualStatsTable or {}
     end
-
-    print("EndRun:enter - receivedStatsTable (originally actualOutcome): " .. tostring(receivedStatsTable) .. ", type: " .. type(receivedStatsTable)) -- DEBUG
-    print("EndRun:enter - receivedOutcomeString (originally actualStatsTable) type: " .. type(receivedOutcomeString)) -- DEBUG
 
     outcomeMessage = (receivedOutcomeString == "win") and "LEVEL CLEARED!" or "GAME OVER"
     stats = receivedStatsTable or {} -- Assign the table to the upvalue 'stats'
@@ -154,7 +151,6 @@ function EndRun:draw()
 end
 
 function EndRun:keypressed(key)
-    print("EndRun:keypressed - About to pop. stats.outcome type: " .. type(stats.outcome) .. ", value: " .. tostring(stats.outcome)) -- DEBUG
     -- When a key is pressed, EndRun simply pops itself from the Gamestate stack.
     -- It passes its stored 'stats.outcome' back to the previous state (which should be Game).
     -- Fix: pass also the stages table if needed

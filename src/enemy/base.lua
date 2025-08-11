@@ -3,17 +3,25 @@ EnemyBase.__index = EnemyBase
 
 function EnemyBase:new(i, j)
     local e = setmetatable({}, self)
-    e.i = i
-    e.j = j
+    e.i = i or 10
+    e.j = j or 10
     e.type = 'base'
     e.color = {0.8, 0.2, 0.2} -- Default enemy color
     e.speed = 1 -- cells per second
-    e.moveDelay = 1.2 -- Default moveDelay for all enemies
+    e.moveDelay = 1.0 -- Faster movement for better challenge
     e.moveTimer = 0
     e.isStunned = false
     e.stunTimer = 0
     e.originalColor = nil
-    e.speedBoost = nil -- Initialize speedBoost
+    e.speedBoost = nil
+    
+    -- Enhanced AI properties
+    e.targetPlayer = false
+    e.aggressionMultiplier = 1.0
+    e.lastPlayerI = nil
+    e.lastPlayerJ = nil
+    e.huntMode = false
+    
     return e
 end
 
@@ -36,28 +44,8 @@ function EnemyBase:hitByFuse()
     self._fuseHitColor = {1, 1, 1, 1}
 end
 
-function EnemyBase:update(dt, grid, player)
-    -- ABSOLUTE BLOCK: If forced slow is set and moveDelay >= 900 or speed < 0.01, do not move at all
-    if (self._forcedSlow and (self.moveDelay and self.moveDelay >= 900 or self.speed and self.speed < 0.01)) then
-        print('ENEMYBASE BLOCKED:', self.type, 'moveDelay:', self.moveDelay, 'speed:', self.speed)
-        return true -- Block all movement
-    end
-    -- DEBUG: Print type and moveDelay every frame for all enemies
-    print('ENEMYBASE UPDATE:', self.type, 'moveDelay:', self.moveDelay, 'speed:', self.speed)
-    local actualSpeed = self.speed or 1
-    if self.speedBoost then
-        actualSpeed = actualSpeed * self.speedBoost
-    end
-    self.moveTimer = (self.moveTimer or 0) - dt * actualSpeed
-
-    -- Fuse hit visual effect
-    if self._fuseHitTimer and self._fuseHitTimer > 0 then
-        self._fuseHitTimer = self._fuseHitTimer - dt
-        if self._fuseHitTimer <= 0 then
-            self._fuseHitColor = nil
-        end
-    end
-
+function EnemyBase:update(dt, grid, playerI, playerJ)
+    -- Handle stun status first
     if self.isStunned then
         self.stunTimer = self.stunTimer - dt
         if self.stunTimer <= 0 then
@@ -66,15 +54,142 @@ function EnemyBase:update(dt, grid, player)
                 self.color = {self.originalColor[1], self.originalColor[2], self.originalColor[3]}
                 self.originalColor = nil
             else
-                -- Fallback if originalColor wasn't set (should not happen with current setStunned logic)
                 self.color = {0.8, 0.2, 0.2} 
             end
         end
-        -- While stunned, an enemy might still be vulnerable or have minimal animation
-        -- For now, they just won't perform their main logic (like moving)
-        return true -- Indicate that the update was handled (stunned)
+        return true -- Skip movement while stunned
     end
-    return false -- Indicate not stunned, proceed with specific enemy logic
+
+    -- Update visual effects
+    if self._fuseHitTimer and self._fuseHitTimer > 0 then
+        self._fuseHitTimer = self._fuseHitTimer - dt
+        if self._fuseHitTimer <= 0 then
+            self._fuseHitColor = nil
+        end
+    end
+
+    -- Enhanced AI movement
+    local actualSpeed = (self.speed or 1) * (self.aggressionMultiplier or 1.0)
+    if self.speedBoost then
+        actualSpeed = actualSpeed * self.speedBoost
+    end
+    
+    self.moveTimer = (self.moveTimer or 0) - dt * actualSpeed
+
+    if self.moveTimer <= 0 then
+        self.moveTimer = self.moveDelay or 1.0
+        
+        -- Store player position for tracking
+        if playerI and playerJ then
+            self.lastPlayerI = playerI
+            self.lastPlayerJ = playerJ
+        end
+        
+        -- Enhanced movement AI
+        local moveI, moveJ = self:calculateMovement(grid, playerI, playerJ)
+        
+        -- Validate movement
+        if self:canMoveTo(grid, moveI, moveJ) then
+            self.i = moveI
+            self.j = moveJ
+        end
+    end
+    
+    return false
+end
+
+-- Enhanced movement AI
+function EnemyBase:calculateMovement(grid, playerI, playerJ)
+    if not playerI or not playerJ then
+        return self:randomMovement()
+    end
+    
+    -- Calculate distance to player
+    local distToPlayer = math.sqrt((self.i - playerI)^2 + (self.j - playerJ)^2)
+    
+    -- Aggressive targeting when player is drawing
+    if self.targetPlayer and distToPlayer > 1.5 then
+        return self:moveTowardsPlayer(playerI, playerJ)
+    elseif distToPlayer < 8 then
+        -- Hunt mode - move towards player when nearby
+        self.huntMode = true
+        return self:moveTowardsPlayer(playerI, playerJ)
+    else
+        -- Patrol mode - random movement with slight bias towards center
+        self.huntMode = false
+        return self:patrolMovement(grid)
+    end
+end
+
+function EnemyBase:moveTowardsPlayer(playerI, playerJ)
+    local dx = playerI - self.i
+    local dy = playerJ - self.j
+    
+    -- Add some randomness to avoid completely predictable movement
+    local randomFactor = 0.3
+    dx = dx + (math.random() - 0.5) * randomFactor
+    dy = dy + (math.random() - 0.5) * randomFactor
+    
+    -- Normalize and move one step
+    local moveI = self.i
+    local moveJ = self.j
+    
+    if math.abs(dx) > math.abs(dy) then
+        moveI = self.i + (dx > 0 and 1 or -1)
+    else
+        moveJ = self.j + (dy > 0 and 1 or -1)
+    end
+    
+    return moveI, moveJ
+end
+
+function EnemyBase:patrolMovement(grid)
+    -- Bias towards center of map for better shape interference
+    local centerI = math.floor(grid.width / 2)
+    local centerJ = math.floor(grid.height / 2)
+    
+    local toCenterI = centerI - self.i
+    local toCenterJ = centerJ - self.j
+    
+    local moveI = self.i
+    local moveJ = self.j
+    
+    -- 70% chance to move towards center, 30% random
+    if math.random() < 0.7 and (math.abs(toCenterI) > 5 or math.abs(toCenterJ) > 5) then
+        if math.abs(toCenterI) > math.abs(toCenterJ) then
+            moveI = self.i + (toCenterI > 0 and 1 or -1)
+        else
+            moveJ = self.j + (toCenterJ > 0 and 1 or -1)
+        end
+    else
+        -- Random movement
+        local dirs = {{-1,0}, {1,0}, {0,-1}, {0,1}}
+        local dir = dirs[math.random(#dirs)]
+        moveI = self.i + dir[1]
+        moveJ = self.j + dir[2]
+    end
+    
+    return moveI, moveJ
+end
+
+function EnemyBase:randomMovement()
+    local dirs = {{-1,0}, {1,0}, {0,-1}, {0,1}, {-1,-1}, {1,1}, {-1,1}, {1,-1}}
+    local dir = dirs[math.random(#dirs)]
+    return self.i + dir[1], self.j + dir[2]
+end
+
+function EnemyBase:canMoveTo(grid, newI, newJ)
+    -- Check bounds
+    if newI < 1 or newI > grid.width or newJ < 1 or newJ > grid.height then
+        return false
+    end
+    
+    -- Check if position is available (not claimed territory)
+    if grid.cells[newI] and grid.cells[newI][newJ] == 'claimed' then
+        return false
+    end
+    
+    return true
 end
 
 function EnemyBase:draw(grid)

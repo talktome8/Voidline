@@ -2,11 +2,29 @@
 local Sound = {}
 local sounds = {}
 
+local function loadSoundSafe(path, type)
+    local success, sound = pcall(love.audio.newSource, path, type or "static")
+    if success then
+        return sound
+    else
+    if not Sound._missing then Sound._missing = {} end
+    table.insert(Sound._missing, path)
+        return nil
+    end
+end
+
 function Sound.load()
-    sounds.zone = love.audio.newSource("assets/sounds/zone_close.wav", "static")
-    sounds.death = love.audio.newSource("assets/sounds/death.wav", "static")
-    sounds.ability = love.audio.newSource("assets/sounds/ability.wav", "static")
-    sounds.boss = love.audio.newSource("assets/sounds/boss.wav", "static")
+    sounds.zone = loadSoundSafe("assets/sounds/zone_close.wav")
+    sounds.death = loadSoundSafe("assets/sounds/death.wav")
+    sounds.ability = loadSoundSafe("assets/sounds/ability.wav")
+    sounds.boss = loadSoundSafe("assets/sounds/boss.wav")
+    if Sound._missing and #Sound._missing > 0 then
+        print("Warning: Some sounds missing (", #Sound._missing, ") - running with silent fallbacks")
+        for _,p in ipairs(Sound._missing) do
+            -- Uncomment for detailed list
+            -- print("  missing:", p)
+        end
+    end
 end
 
 function Sound.play(name)

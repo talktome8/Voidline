@@ -1,140 +1,242 @@
-local love = require "love"
-local Menu = {}
+-- Menu State for Voidline
 local Gamestate = require 'hump.gamestate'
-local Achievements = require 'src.ui.achievements'
 
--- Fonts
-local font_title
-local font_options
-local font_achievements_title
-local font_info
-local font_menu
-local font_tip
+local Menu = {}
 
-function Menu:load()
-    font_title = love.graphics.newFont(36)
-    font_options = love.graphics.newFont(18)
-    font_achievements_title = love.graphics.newFont(14)
-    font_info = love.graphics.newFont(16)
-    font_menu = love.graphics.newFont(24)
-    font_tip = love.graphics.newFont(16)
-    self.menuOptions = {
-        {label = "Select Character", action = function() Gamestate.switch(require 'src.ui.select_character') end},
-        {label = "How to Play", action = function() Gamestate.switch(require 'src.ui.how_to_play') end},
-        {label = "Quit", action = function() love.event.quit() end},
-    }
-end
+-- Fallback menu system
+local fallbackButtons = {}
+local font = nil
+local titleFont = nil
 
 function Menu:enter()
-    self:load()
-    self.selectedIdx = 1
+    local ok, Config = pcall(require, 'src.config')
+    if ok and Config.debug and Config.debug.enabled then print("Menu:enter() called") end
+    
+    -- Initialize fonts with fallbacks
+    titleFont = love.graphics.newFont(32) or love.graphics.getFont()
+    font = love.graphics.newFont(16) or love.graphics.getFont()
+    
+    -- Initialize particles for background effect
+    self.backgroundTime = 0
+    self.particles = {}
+    
+    -- Generate some background particles
+    for i = 1, 50 do
+        table.insert(self.particles, {
+            x = math.random(0, love.graphics.getWidth()),
+            y = math.random(0, love.graphics.getHeight()),
+            speed = math.random(10, 50),
+            size = math.random(1, 3),
+            alpha = math.random(0.1, 0.5)
+        })
+    end
+    
+    self:initializeFallbackMenu()
+    if ok and Config.debug and Config.debug.enabled then print("Menu initialized successfully") end
+end
+
+function Menu:initializeFallbackMenu()
+    local ok, Config = pcall(require, 'src.config')
+    if ok and Config.debug and Config.debug.enabled then print("Initializing fallback menu") end
+    
+    -- Create simple fallback buttons
+    local screenWidth, screenHeight = love.graphics.getDimensions()
+    local buttonWidth = 300
+    local buttonHeight = 50
+    local startX = (screenWidth - buttonWidth) / 2
+    local startY = screenHeight / 2
+    
+    fallbackButtons = {
+        {
+            text = "Start Game",
+            x = startX,
+            y = startY,
+            width = buttonWidth,
+            height = buttonHeight,
+            hovered = false,
+            callback = function()
+                if ok and Config.debug and Config.debug.enabled then print("Starting game...") end
+                local success, Game = pcall(require, 'src.game')
+                if success and Game then
+                    Gamestate.switch(Game)
+                else
+                    if ok and Config.debug and Config.debug.enabled then print("Failed to load game! Error: " .. tostring(Game)) end
+                end
+            end
+        },
+        {
+            text = "How to Play",
+            x = startX,
+            y = startY + 70,
+            width = buttonWidth,
+            height = buttonHeight,
+            hovered = false,
+            callback = function()
+                if ok and Config.debug and Config.debug.enabled then print("How to Play clicked") end
+                -- Could load a how-to-play state later
+            end
+        },
+        {
+            text = "Settings",
+            x = startX,
+            y = startY + 140,
+            width = buttonWidth,
+            height = buttonHeight,
+            hovered = false,
+            callback = function()
+                if ok and Config.debug and Config.debug.enabled then print("Settings clicked (not implemented)") end
+            end
+        },
+        {
+            text = "Quit",
+            x = startX,
+            y = startY + 210,
+            width = buttonWidth,
+            height = buttonHeight,
+            hovered = false,
+            callback = function()
+                love.event.quit()
+            end
+        }
+    }
+    
+    if ok and Config.debug and Config.debug.enabled then print("Created " .. #fallbackButtons .. " fallback buttons") end
 end
 
 function Menu:update(dt)
-    if love.keyboard.isDown('down') then
-        self.selectedIdx = math.min((self.selectedIdx or 1) + 1, #self.menuOptions)
-    elseif love.keyboard.isDown('up') then
-        self.selectedIdx = math.max((self.selectedIdx or 1) - 1, 1)
-    elseif love.keyboard.isDown('return') or love.keyboard.isDown('kpenter') or love.keyboard.isDown('space') then
-        local selectedOption = self.menuOptions[self.selectedIdx]
-        if selectedOption and selectedOption.action then
-            selectedOption.action()
+    -- Update background animation
+    self.backgroundTime = self.backgroundTime + dt
+    
+    -- Update particles
+    for _, particle in ipairs(self.particles) do
+        particle.y = particle.y + particle.speed * dt
+        if particle.y > love.graphics.getHeight() then
+            particle.y = -10
+            particle.x = math.random(0, love.graphics.getWidth())
         end
+    end
+    
+    -- Update button hover states
+    local mx, my = love.mouse.getPosition()
+    for _, button in ipairs(fallbackButtons) do
+        button.hovered = mx >= button.x and mx <= button.x + button.width and
+                        my >= button.y and my <= button.y + button.height
     end
 end
 
 function Menu:draw()
-    local ww, wh = love.graphics.getWidth(), love.graphics.getHeight()
-    -- Modern animated gradient background
-    for i=0, wh, 2 do
-        local t = i/wh
-        love.graphics.setColor(0.09*(1-t)+0.18*t, 0.13*(1-t)+0.22*t, 0.19*(1-t)+0.28*t + 0.03*math.sin(love.timer.getTime()*0.7+i*0.01), 1)
-        love.graphics.rectangle('fill', 0, i, ww, 2)
-        if i%18==0 then
-            love.graphics.setColor(0.12,0.18,0.28,0.10+0.08*math.abs(math.sin(love.timer.getTime()*0.5+i*0.02)))
-            for x=0,ww,40 do
-                love.graphics.circle('fill', x, i, 8+2*math.sin(love.timer.getTime()+x*0.01+i*0.01))
+    -- Clear screen with dark background
+    love.graphics.clear(0.05, 0.05, 0.1, 1)
+    
+    -- Draw animated background particles
+    love.graphics.setColor(0.3, 0.8, 1.0, 0.3)
+    for _, particle in ipairs(self.particles) do
+        love.graphics.circle("fill", particle.x, particle.y, particle.size)
+    end
+    
+    -- Draw animated background grid effect
+    love.graphics.setColor(0.1, 0.3, 0.6, 0.2)
+    local time = self.backgroundTime
+    for i = 1, 5 do
+        local offset = math.sin(time + i) * 20
+        love.graphics.line(0, i * 120 + offset, love.graphics.getWidth(), i * 120 + offset)
+        love.graphics.line(i * 160 + offset, 0, i * 160 + offset, love.graphics.getHeight())
+    end
+    
+    -- Draw title with glow effect
+    local titleText = "VOIDLINE"
+    local screenWidth, screenHeight = love.graphics.getDimensions()
+    
+    -- Title glow effect
+    for i = 5, 1, -1 do
+        love.graphics.setColor(0.3, 0.8, 1.0, 0.3 / i)
+        love.graphics.setFont(titleFont)
+        love.graphics.printf(titleText, -i, screenHeight / 6 - i, screenWidth, "center")
+        love.graphics.printf(titleText, i, screenHeight / 6 + i, screenWidth, "center")
+    end
+    
+    -- Main title
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.setFont(titleFont)
+    love.graphics.printf(titleText, 0, screenHeight / 6, screenWidth, "center")
+    
+    -- Subtitle
+    love.graphics.setFont(font)
+    local subtitleText = "Enter the Void"
+    love.graphics.setColor(0.7, 0.9, 1.0, 0.8)
+    love.graphics.printf(subtitleText, 0, screenHeight / 6 + 50, screenWidth, "center")
+    
+    -- Draw fallback buttons
+    self:drawFallbackButtons()
+end
+
+function Menu:drawFallbackButtons()
+    love.graphics.setFont(font)
+    
+    for _, button in ipairs(fallbackButtons) do
+        -- Button background
+        if button.hovered then
+            love.graphics.setColor(0.2, 0.5, 0.8, 0.8)
+        else
+            love.graphics.setColor(0.1, 0.1, 0.2, 0.7)
+        end
+        love.graphics.rectangle("fill", button.x, button.y, button.width, button.height, 5, 5)
+        
+        -- Button border
+        if button.hovered then
+            love.graphics.setColor(0.5, 0.8, 1.0, 1)
+        else
+            love.graphics.setColor(0.3, 0.6, 0.9, 0.8)
+        end
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", button.x, button.y, button.width, button.height, 5, 5)
+        
+    -- Button text
+    love.graphics.setColor(1, 1, 1, 1)
+    local fhObj = love.graphics.getFont()
+    local fheight = (fhObj and fhObj.getHeight) and fhObj:getHeight() or 16
+    love.graphics.printf(button.text, button.x, button.y + button.height/2 - fheight/2, button.width, "center")
+    end
+end
+
+function Menu:keypressed(key, scancode, isRepeat)
+    if key == "escape" then
+        love.event.quit()
+    elseif key == "return" or key == "space" then
+        -- Activate first button (Start Game)
+        if fallbackButtons[1] and fallbackButtons[1].callback then
+            fallbackButtons[1].callback()
+        end
+    end
+end
+
+function Menu:mousepressed(x, y, button, isTouch, presses)
+    if button == 1 then -- Left mouse button
+        for _, btn in ipairs(fallbackButtons) do
+            if x >= btn.x and x <= btn.x + btn.width and
+               y >= btn.y and y <= btn.y + btn.height then
+                local ok, Config = pcall(require, 'src.config')
+                if ok and Config.debug and Config.debug.enabled then print("Button clicked: " .. btn.text) end
+                if btn.callback then
+                    btn.callback()
+                end
+                break
             end
         end
     end
-    -- Add animated logo or icon
-    local logoPulse = 0.9+0.1*math.sin(love.timer.getTime()*2)
-    love.graphics.setColor(0.2*logoPulse,0.7*logoPulse,1*logoPulse,0.7)
-    love.graphics.circle('fill', ww/2, 60, 38+6*logoPulse, 64)
-    love.graphics.setColor(1,1,1,0.18)
-    love.graphics.circle('line', ww/2, 60, 44+8*logoPulse, 64)
-    -- Title with animated shadow
-    love.graphics.setFont(font_title)
-    for dx=-4,4 do for dy=-4,4 do
-        if dx~=0 or dy~=0 then
-            love.graphics.setColor(0,0,0,0.22-0.02*math.abs(dx*dy))
-            love.graphics.printf('Voidline', dx, 80+dy, ww, 'center')
-        end
-    end end
-    love.graphics.setColor(1,1,1)
-    love.graphics.printf('Voidline', 0, 80, ww, 'center')
-    -- Description
-    love.graphics.setFont(font_options)
-    love.graphics.setColor(0.8,0.9,1,0.98)
-    love.graphics.printf('A tactical arcade game of risk and reward', 0, 128, ww, 'center')
-    love.graphics.setColor(0.2,0.7,1,1)
-    love.graphics.setFont(font_options)
-    love.graphics.printf('Press Space/Enter to Select Character', 0, 160, ww, 'center')
-    -- Menu options with highlight and subtle animation
-    local menuY = 220
-    for i, opt in ipairs(self.menuOptions) do
-        local y = menuY + (i-1)*60
-        if i == (self.selectedIdx or 1) then
-            local pulse = 0.95+0.05*math.sin(love.timer.getTime()*3)
-            love.graphics.setColor(0.2*pulse,0.7*pulse,1*pulse,1)
-            love.graphics.rectangle('fill', ww/2-140, y-8, 280, 48, 32, 32)
-            love.graphics.setColor(1,1,1)
-            love.graphics.setFont(font_menu)
-            love.graphics.printf(opt.label, 0, y+2, ww, 'center')
-        else
-            love.graphics.setColor(0.2,0.2,0.2,0.7)
-            love.graphics.setFont(font_menu)
-            love.graphics.printf(opt.label, 0, y, ww, 'center')
-        end
-    end
-    -- Achievements box with icon
-    love.graphics.setFont(font_achievements_title)
-    love.graphics.setColor(1,1,1,0.92)
-    love.graphics.rectangle('fill', ww/2-160, menuY+140, 320, 120, 18, 18)
-    love.graphics.setColor(0.15,0.18,0.22,0.13)
-    love.graphics.rectangle('line', ww/2-160, menuY+140, 320, 120, 18, 18)
-    love.graphics.setColor(0.2,0.2,0.2,1)
-    love.graphics.printf('Achievements', ww/2-160, menuY+148, 320, 'center')
-    -- Draw a trophy icon
-    love.graphics.setColor(1, 0.85, 0.2, 0.8)
-    love.graphics.circle('fill', ww/2, menuY+180, 18, 32)
-    love.graphics.setColor(0.7,0.5,0.1,1)
-    love.graphics.rectangle('fill', ww/2-8, menuY+198, 16, 12, 4, 4)
-    love.graphics.setColor(1,1,1,1)
-    Achievements:draw(ww/2-150, menuY+170, 300, 80)
-    -- Tip
-    love.graphics.setFont(font_tip)
-    love.graphics.setColor(0.8,0.9,1,0.7)
-    love.graphics.printf("Tip: Claim big areas for more points! Use abilities to outsmart enemies!", 0, wh-60, ww, 'center')
-    -- Show controls
-    love.graphics.setFont(font_tip)
-    love.graphics.setColor(0.7,0.9,1,0.7)
-    love.graphics.printf("Controls: Arrows/WASD = Move, Space/Enter = Select, Esc = Quit", 0, wh-36, ww, 'center')
 end
 
-function Menu:keypressed(key)
-    if key == 'escape' then
-        love.event.quit()
-    elseif key == 'space' or key == 'return' or key == 'kpenter' then
-        local selectedOption = self.menuOptions[self.selectedIdx]
-        if selectedOption and selectedOption.action then
-            selectedOption.action()
-        end
-    elseif key == 'down' then
-        self.selectedIdx = math.min((self.selectedIdx or 1) + 1, #self.menuOptions)
-    elseif key == 'up' then
-        self.selectedIdx = math.max((self.selectedIdx or 1) - 1, 1)
-    end
+function Menu:resize(w, h)
+    -- Reinitialize buttons with new screen dimensions
+    self:initializeFallbackMenu()
+end
+
+function Menu:leave()
+    local ok, Config = pcall(require, 'src.config')
+    if ok and Config.debug and Config.debug.enabled then print("Menu:leave() called") end
+    -- Clean up
+    fallbackButtons = {}
+    self.particles = {}
 end
 
 return Menu

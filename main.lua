@@ -31,35 +31,49 @@ function _G.love.load()
             for i, v in ipairs(args) do
                 s_for_file = s_for_file .. tostring(v)
                 if i < #args then
-                    s_for_file = s_for_file .. "\\t" -- Use actual tab character for file
+                    s_for_file = s_for_file .. "\t"
                 end
             end
-            logFile:write(s_for_file .. "\\n") -- Use actual newline character for file
-            logFile:flush() -- Ensure it's written immediately
+            logFile:write(s_for_file .. "\n")
+            logFile:flush()
             
-            -- For originalPrint, pass arguments directly to let it handle formatting
-            -- LuaJIT (used by Love2D) is based on Lua 5.1, where unpack is global.
-            originalPrint(unpack(args)) -- Use global unpack directly
-
+            -- Call original print with all arguments
+            if #args == 0 then
+                originalPrint()
+            elseif #args == 1 then
+                originalPrint(args[1])
+            elseif #args == 2 then
+                originalPrint(args[1], args[2])
+            elseif #args == 3 then
+                originalPrint(args[1], args[2], args[3])
+            else
+                -- For more than 3 args, convert to string
+                originalPrint(s_for_file)
+            end
         end
     end
 
     -- Load all dynamic modules first, as requireAll needs love.filesystem
     require 'src.init'
+    
+    -- Load sound system
+    local Sound = require 'src.utils.sound'
+    Sound.load()
 
     -- Now require other top-level modules that might depend on components loaded by src.init
     Menu = require 'src.ui.menu'
     Game = require 'src.game'
     EndRun = require 'src.ui.endrun'
 
-    print('Voidline initialized')
+    do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then print('Voidline initialized') end end
     Gamestate.registerEvents()
     Gamestate.switch(Menu)
 end
 
 function _G.love.quit()
     if logFile then
-        print("Closing log file.") -- This will also go to the log file itself before closing
+    local ok, Config = pcall(require, 'src.config')
+    if ok and Config.debug and Config.debug.enabled then print("Closing log file.") end -- This will also go to the log file itself before closing
         logFile:close()
         logFile = nil
     end

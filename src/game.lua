@@ -1,700 +1,901 @@
--- src/game.lua
--- Central game state machine and main game loop. Handles level flow, enemy/player/grid updates, and delegates UI overlays to the HUD module.
+-- src/game.lua  
+-- Territory capture game state integrating existing Player and Grid systems
 
 local love = require "love"
-local Gamestate = require 'hump.gamestate' -- Added this line
+local Gamestate = require 'hump.gamestate'
+
 local Game = {}
+local ok_cfg, Config = pcall(require, 'src.config')
+
+-- Core Systems
 local Grid = require 'src.grid'
 local Player = require 'src.player'
-local enemiesLib = require 'src.enemy.init'
-local Architect = require 'src.characters.architect'
-local Trickster = require 'src.characters.trickster'
-local VoidHatchery = require 'src.realms.void_hatchery'
-local EchoLab = require 'src.realms.echo_lab'
-local PulseMines = require 'src.realms.pulse_mines' -- Added PulseMines
+local Config = require 'src.config'
 
--- Require the EndRun state correctly
-local EndRun = require 'src.ui.endrun' 
+-- Shape Drawing Systems
+local ShapeTemplates = require 'src.systems.shape_templates'
+local DrawPathSystem = require 'src.systems.draw_path_system'
+-- Safe no-op fallback if require fails (defensive)
+if not DrawPathSystem then
+    DrawPathSystem = { new=function()
+        return { reset=function()end, startPath=function()end, addPoint=function()end, finishPath=function()end, update=function()end, draw=function()end }
+    end }
+end
+local ShapeMatcher = require 'src.systems.shape_matcher'
+local ShapeScore = require 'src.systems.shape_score'
+local ShapeFeedback = require 'src.systems.shape_feedback'
+local ShapePanel = require 'src.ui.shape_panel'
 local IngameHUD = require 'src.ui.ingame_hud'
-local Achievements = require('src.ui.achievements')
 
-local Sound = require('src.utils.sound')
-
--- enemies table
-local enemies = {} -- Enemy list for the current level
-local gameOver = false
-local win = false
+-- Game State
+local gameTime = 0
 local level = 1
-local requiredPercents = {0.3, 0.4, 0.5, 0.6, 0.7, 0.8}
-local deaths = 0
-local wins = 0
-local startTime = 0
-local elapsedTime = 0
-local autoRestartTimer = 0
-local autoRestartDelay = 2
-local score = 0 -- Initialize score
-local characters = require('src.characters.init')
--- Only the first character is unlocked at the start; others unlock as you progress
-local unlockedCharacters = {1} -- Only Architect (or first character) is unlocked initially
-local characterUnlockLevels = {
-    [2] = 2,   -- Trickster unlocks after boss at level 2
-    [3] = 4,   -- Guardian unlocks after boss at level 4
-    [4] = 6,   -- Echo unlocks after boss at level 6
-    [5] = 8,   -- Sprinter unlocks after boss at level 8
-    [6] = 10,  -- Scorer unlocks after boss at level 10
+local score = 0
+local shapeScore = 0
+local targetPercentage = 75 -- Win condition: capture 75% of territory
+local gameOver = false
+local gameWon = false
+local livesRemaining = 3
+local enemySpawnTimer = 0
+local enemySpawnDelay = 3.0
+local Enemies = {}
+
+-- Shape Challenge State
+local currentShapeTemplate = nil
+local targetShapeId = nil
+local shapeChallenge = {
+    active = false,
+    completed = false,
+    showPreview = true,
+    previewTimer = 3.0, -- Show template for 3 seconds
+    result = nil
 }
-local characterUnlockPending = {} -- Tracks which unlocks are pending boss defeat
-local unlockMessage = nil
-local unlockMessageTimer = 0
-local unlockMessageDuration = 3
-local realms = {VoidHatchery, EchoLab, PulseMines} -- Added PulseMines to realms
-local currentRealmIdx = 1 -- Will be superseded by selectedRealm object
-local currentRealm = realms[currentRealmIdx] -- Initial default
 
--- Make selectedCharacter and selectedRealm global variables (not attached to Game)
-selectedCharacter = nil
-selectedRealm = nil
-
-local function getCharacterByName(name)
-    local characters = require('src.characters.init')
-    for _, char in ipairs(characters) do
-        if char.name == name then return char end
-    end
-    return characters[1] -- fallback to first
+-- Character Selection
+if not _G.selectedCharacter then
+    _G.selectedCharacter = {name = "Architect", speed = 1.0}
 end
+_G.currentLevel = level
 
--- Function called when this state is entered for the first time or via Gamestate.switch
 function Game:enter(...)
-    local args = {...}
-    local foundCharacter = false
-    local canonicalChar = nil
-    for _, arg in ipairs(args) do
-        if arg and arg.name and arg.description and arg.passives then
-            canonicalChar = getCharacterByName(arg.name)
-            selectedCharacter = canonicalChar
-            _G.selectedCharacter = canonicalChar
-            foundCharacter = true
-            print('DEBUG: Game:enter - selectedCharacter set to', canonicalChar.name, tostring(canonicalChar))
-            if type(arg) == 'table' then
-                for k,v in pairs(arg) do print('DEBUG: Game:enter arg['..tostring(k)..']='..tostring(v)) end
-            end
-        elseif arg and arg.name and arg.description then
-            Game:selectRealm(arg)
-        end
-    end
-    -- Only use _G.selectedCharacter if nothing was passed at all
-    if not foundCharacter then
-        if _G.selectedCharacter then
-            canonicalChar = getCharacterByName(_G.selectedCharacter.name)
-            selectedCharacter = canonicalChar
-            print('DEBUG: Game:enter - fallback to _G.selectedCharacter:', canonicalChar.name, tostring(canonicalChar))
-        else
-            selectedCharacter = getCharacterByName("Architect")
-            print('DEBUG: Game:enter - fallback to Architect')
-        end
-    end
-    print('DEBUG: Game:enter - final selectedCharacter:', selectedCharacter.name, tostring(selectedCharacter))
-    self:load()
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Game:enter() - Starting new game") end
+    self:initializeGame()
 end
 
-function Game:resume(poppedState, outcomeString, stagesArg)
-    local stages = stagesArg or require('src.stages.init')
-    print("Game:resume called. Popped state type: " .. type(poppedState) .. ", Outcome string: " .. tostring(outcomeString) .. ", current level before increment: " .. level)
-    if outcomeString == "win" then
-        -- Check if a character should be unlocked after this boss level
-        for idx, unlockLevel in pairs(characterUnlockLevels) do
-            if level == unlockLevel and not self:isCharacterUnlocked(idx) then
-                characterUnlockPending[idx] = true
-            end
-        end
-        -- Actually unlock after boss is defeated (on win)
-        for idx, pending in pairs(characterUnlockPending) do
-            if pending then
-                self:unlockCharacter(idx)
-                unlockMessage = (characters[idx].name or ("Character #"..idx)) .. " unlocked!"
-                unlockMessageTimer = unlockMessageDuration
-                characterUnlockPending[idx] = nil
-            end
-        end
-        level = level + 1
-        print("Game:resume - Level incremented to: ", level)
-        win = false
-        gameOver = false
-        self:load()
-        return
-    elseif outcomeString == "gameOver" then
-        print("Game:resume - Game Over. Reloading level: ", level)
-        Sound.play('death')
-        win = false
-        gameOver = false
-        self:load()
-        return
-    end
-    -- === Achievements logic ===
-    -- 1. Close 90% in a single run
-    if Grid and Grid.getClaimedPercent and Grid:getClaimedPercent() >= 0.9 then
-        Achievements:unlock("close90")
-    end
-    -- 2. Defeat boss (if current stage is boss)
-    local stageIdx = ((level-1) % #stages) + 1
-    local stage = stages[stageIdx]
-    if outcomeString == "win" and stage and stage.name and string.lower(stage.name):find("boss") then
-        Achievements:unlock("defeatBoss")
-        Sound.play('boss')
-    end
-    -- 3. Win with every character
-    if outcomeString == "win" and selectedCharacter and selectedCharacter.name then
-        Achievements.personal["win_"..selectedCharacter.name] = true
-        local allWon = true
-        for _, char in ipairs(characters) do
-            if not Achievements.personal["win_"..char.name] then allWon = false end
-        end
-        if allWon then Achievements:unlock("allChars") end
-    end
-    -- 4. Win a stage without dying
-    if outcomeString == "win" and deaths == 0 then
-        Achievements:unlock("noDeath")
-    end
-    -- === Endrun stats logic ===
-    local statsTable = {
-        level = level,
-        characterName = (selectedCharacter and selectedCharacter.name) ~= nil and (selectedCharacter and selectedCharacter.name)
-            or ((Player.character and Player.character.name) ~= nil and (Player.character and Player.character.name))
-            or (characters[unlockedCharacters[1]].name),
-        claimedPercent = math.floor(Grid:getClaimedPercent()*100),
-        requiredPercent = math.floor(Grid.requiredClaimedPercent*100),
-        areaCleared = (Grid.width-2)*(Grid.height-2),
-        score = score,
-        deaths = deaths,
-        wins = wins,
-        zonesClosed = zonesClosed or 0,
-        abilitiesUsed = Player.abilitiesUsed or 0,
-        bossesDefeated = bossesDefeated or 0,
-        -- outcome is passed as a separate param to EndRun:enter
-    }
-    local currentOutcome = win and "win" or "gameOver"
-    Gamestate.push(EndRun, currentOutcome, statsTable)
-    return
-end
-
-local stages = require('src.stages.init')
-Game.stages = stages
-function Game:load()
-    local ww, wh = love.graphics.getWidth(), love.graphics.getHeight()
-    print("Game:load() - Loading level: ", level)
-    -- Stage system: pick stage by level (cycle if needed)
-    local stageIdx = ((level-1) % #stages) + 1
-    local stage = stages[stageIdx]
-    print("Stage:", stage.name)
-    -- Grid size and percent
-    local gridW, gridH = stage.gridW or 24, stage.gridH or 16
-    Grid.width = gridW
-    Grid.height = gridH
-    Grid:setSizeToWindow(ww, wh, 32)
-    Grid:load()
-    enemies = {}
-    powerups = {}
-    powerupSpawnTimer = 0
-    -- Enemies for this stage
-    for _, e in ipairs(stage.enemies(level, enemiesLib, Grid)) do table.insert(enemies, e) end
-    -- PowerUps for this stage (always pass PowerUps table)
-    local powerupsList = {}
-    if stage.powerups then
-        powerupsList = stage.powerups(level, _G.PowerUps or PowerUps, Grid) or {}
-    else
-        -- Add Freeze powerup every 3rd level as דוגמה
-        if level % 3 == 0 then table.insert(powerupsList, PowerUps.Freeze) end
-    end
-    for _, pu in ipairs(powerupsList) do table.insert(powerups, pu) end
-    -- Special rules for this stage
-    if stage.special then stage.special(self, Player, Grid) end
-
-    -- Character unlock logic: only mark unlock as pending if boss is present and not yet defeated
-    for idx, unlockLevel in pairs(characterUnlockLevels) do
-        if level == unlockLevel and not self:isCharacterUnlocked(idx) and not characterUnlockPending[idx] then
-            characterUnlockPending[idx] = false
-        end
-    end
-    -- Always use selectedCharacter, fallback to Architect only if nil
-    local characterToLoad = selectedCharacter or _G.selectedCharacter
-    if not characterToLoad then
-        characterToLoad = getCharacterByName("Architect")
-        selectedCharacter = characterToLoad
-        _G.selectedCharacter = characterToLoad
-        print('DEBUG: Fallback to Architect!')
-    else
-        -- Always normalize to the canonical object from the array
-        characterToLoad = getCharacterByName(characterToLoad.name)
-        selectedCharacter = characterToLoad
-        _G.selectedCharacter = characterToLoad
-    end
-    print('DEBUG: Game:load will use character:', characterToLoad and characterToLoad.name or 'NIL', tostring(characterToLoad))
-    Player:load(Grid, characterToLoad)
-    Player.character = characterToLoad
-    print('DEBUG: Player.character is now:', Player.character and Player.character.name or 'NIL', tostring(Player.character))
-    self:applyCharacterPassives()
-    -- Apply per-character, per-stage modifiers
-    if Player.character and Player.character.characterStageModifier then
-        Player.character:characterStageModifier(stage, Player, Grid)
-    end
-    -- After stage.special, all enemy logic is now handled by the stage definition
-
-    Grid.enemies = enemies
-    gameOver = false
-    win = false
-    -- Realm variety
-    currentRealm = selectedRealm or realms[((level-1) % #realms) + 1]
-    Grid:setRequiredClaimedPercent(requiredPercents[level] or 0.8)
-    print("Game:load() - Required percent for level " .. level .. " is " .. (requiredPercents[level] or 0.8) * 100 .. "%")
-    startTime = love.timer.getTime()
-    elapsedTime = 0
-    autoRestartTimer = 0
+function Game:initializeGame()
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Game:initializeGame() called") end
+    
+    -- Reset game state
+    gameTime = 0
     score = 0
-    -- Character/enemy ability hooks (for future improvements)
-    if Player.character and Player.character.onLevelStart then
-        Player.character:onLevelStart(level, Grid)
+    shapeScore = 0
+    gameOver = false
+    gameWon = false
+    livesRemaining = 3
+    enemySpawnTimer = 0
+    Enemies = {}
+    -- Use panel-only HUD by default (hide top-center overlays)
+    self.minimalHUD = true
+    
+    -- Initialize grid with reduced cell size and reserve right panel space
+    local screenWidth, screenHeight = love.graphics.getDimensions()
+    -- Responsive right pane width (panel area)
+    local rightPanePx = math.floor(math.max(260, math.min(380, 0.22 * screenWidth)))
+    Grid:setSizeToWindow(screenWidth, screenHeight, 16, rightPanePx)
+    Grid:load()
+    -- Set required territory percent per level for HUD
+    Grid:setRequiredClaimedPercent(self:getRequiredTerritoryForLevel(level) / 100)
+    
+    -- Set up callback for when territory is claimed
+    Grid.onTerritoryClaimed = function()
+        self:relocateEnemiesFromClaimedTerritory()
+        self:checkTerritoryScoring() -- Check for false scoring
+        -- After area closure and fill, process captured enemies and rewards
+        if self.onAreaClosed then self:onAreaClosed() end
     end
-    for _, enemy in ipairs(enemies) do
-        if enemy.onLevelStart then
-            enemy:onLevelStart(level, Grid)
-        end
-    end
-    print('DEBUG: FINAL selectedCharacter:', selectedCharacter and selectedCharacter.name or 'NIL')
-    for _, enemy in ipairs(enemies) do
-        print('DEBUG: ENEMY', enemy.type, 'moveDelay:', enemy.moveDelay, '_forcedSlow:', enemy._forcedSlow)
+    
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Grid initialized:", Grid.width, "x", Grid.height, "cells") end
+    
+    -- Initialize shape systems (only those that have init methods)
+    -- Instance-based draw path system
+    self.drawPath = DrawPathSystem:new()
+    self.drawPath.grid = Grid
+    self.drawPath:reset()
+    ShapeMatcher:init()
+    ShapeScore.init(ShapeScore)  -- Use dot notation for module method
+    ShapeFeedback:init() -- Initialize the new feedback system
+    
+    -- ShapeTemplates is a static module, no init needed
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Shape systems initialized") end
+    
+    -- Initialize player with grid-based movement
+    Player:load(Grid, _G.selectedCharacter)
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Player initialized at grid position:", Player.i, Player.j) end
+    
+    -- Initialize shape challenge for this level
+    self:initializeShapeChallenge()
+
+    -- Initialize shape panel (top-right), anchor within right pane
+    local panelW = 220
+    local panelH = 240
+    local panelX = screenWidth - (math.max(260, math.min(380, 0.22 * screenWidth))) + 10
+    self.shapePanel = ShapePanel:new({ x = panelX, y = 16, w = panelW, h = panelH })
+    if currentShapeTemplate then
+        self.shapePanel:setTemplate(currentShapeTemplate.name, currentShapeTemplate.points, currentShapeTemplate.requiredAccuracy or 80)
     end
 
-    -- יציבות אויבים: מניעת הופעה על מכשול או תא חסום
-    for _, enemy in ipairs(enemies) do
-        if Grid.cells[enemy.i] and (Grid.cells[enemy.i][enemy.j] == 'obstacle' or Grid.cells[enemy.i][enemy.j] == 'claimed') then
-            -- מצא תא פנוי קרוב
-            for di=-1,1 do for dj=-1,1 do
-                local ni, nj = enemy.i+di, enemy.j+dj
-                if Grid:isInside(ni, nj) and Grid.cells[ni] and Grid.cells[ni][nj] == 'empty' then
-                    enemy.i, enemy.j = ni, nj
-                    break
-                end
-            end end
+    -- Combo tracking for repeated shapes
+    self._shapeCombo = self._shapeCombo or {}
+    self._lastShapeName = nil
+    self._comboMultiplier = 1.0
+    
+    -- Spawn initial enemies based on level
+    self:spawnEnemiesForLevel()
+    
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Game initialized - Level", level, "Target:", targetPercentage .. "%") end
+    if currentShapeTemplate then
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Shape challenge:", currentShapeTemplate.name, "- Difficulty:", currentShapeTemplate.difficulty) end
+    end
+end
+
+function Game:initializeShapeChallenge()
+    -- Get shape template for current level
+    currentShapeTemplate = ShapeTemplates:getShapeForLevel(level)
+    targetShapeId = currentShapeTemplate and currentShapeTemplate.name or nil
+    
+    if currentShapeTemplate then
+        -- Convert template to grid coordinates
+        local gridTemplate = ShapeTemplates:convertToGridCoords(
+            currentShapeTemplate, 
+            Grid.width, 
+            Grid.height, 
+            Grid.offsetX or 0, 
+            Grid.offsetY or 0
+        )
+        currentShapeTemplate = gridTemplate
+        
+        -- Reset shape challenge state
+        shapeChallenge.active = true
+        shapeChallenge.completed = false
+        shapeChallenge.showPreview = true
+        shapeChallenge.previewTimer = 3.0
+        shapeChallenge.result = nil
+        
+    -- Reset feedback system for new level
+    ShapeFeedback:reset()
+    ShapeFeedback:setStars(0)
+        -- Update UI panel template
+        if self.shapePanel then
+            self.shapePanel:setTemplate(currentShapeTemplate.name, currentShapeTemplate.points, currentShapeTemplate.requiredAccuracy or self:getRequiredAccuracyForLevel(level))
+        end
+        
+        if ok_cfg and Config.debug and Config.debug.enabled then
+            print("Shape challenge initialized:", currentShapeTemplate.name)
+        end
+    end
+end
+
+function Game:checkTerritoryScoring()
+    -- Fix: Only award points for actual territory capture via proper loop closure
+    -- This prevents the bug where walking in claimed territory increases score
+    local currentClaimedPercent = Grid:getClaimedPercent() * 100
+    
+    -- Territory scoring should only happen via proper shape closure, not walking
+    -- The score will be calculated in the shape system when shapes are completed
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Territory check - Current claimed:", math.floor(currentClaimedPercent) .. "%") end
+end
+
+function Game:spawnEnemiesForLevel()
+    local enemyCount = math.min(2 + level, 8)
+    local isBossLevel = (level % 5 == 0)
+
+    for i = 1, enemyCount do
+        local enemy = self:createSimpleEnemy()
+        if enemy then
+            -- Scale enemy move frequency with level (faster on higher levels)
+            enemy.moveDelay = math.max(0.18, (enemy.moveDelay or 0.5) - (level - 1) * 0.02)
+            table.insert(Enemies, enemy)
         end
     end
 
-    -- ייצוב תנועת אויבים: מניעת תנועה למכשול/קיר
-    for _, enemy in ipairs(enemies) do
-        local oldUpdate = enemy.update
-        enemy.update = function(self, dt, grid, player)
-            local prevI, prevJ = self.i, self.j
-            oldUpdate(self, dt, grid, player)
-            if grid.cells[self.i] and (grid.cells[self.i][self.j] == 'obstacle' or grid.cells[self.i][self.j] == 'claimed') then
-                self.i, self.j = prevI, prevJ -- לא לזוז למכשול
+    if isBossLevel then
+        local boss = self:createSimpleEnemy()
+        if boss then
+            boss.isBoss = true
+            boss.health = 3
+            boss.moveDelay = math.max(0.22, 0.5 - (level - 1) * 0.01)
+            table.insert(Enemies, boss)
+        end
+    end
+
+    -- Clean up any enemies that might be in claimed territory
+    self:relocateEnemiesFromClaimedTerritory()
+
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Spawned", #Enemies, "enemies for level", level, isBossLevel and "(Boss present)" or "") end
+end
+
+-- After a successful area closure and flood fill, remove captured enemies and apply rewards
+function Game:onAreaClosed()
+    local captured = 0
+    for idx = #Enemies, 1, -1 do
+        local e = Enemies[idx]
+        if Grid:isClaimed(e.i, e.j) then
+            captured = captured + 1
+            if e.isBoss then
+                livesRemaining = (livesRemaining or 0) + 1
+                if ok_cfg and Config.debug and Config.debug.enabled then print("Boss captured: +1 life (" .. tostring(livesRemaining) .. ")") end
+            end
+            table.remove(Enemies, idx)
+        end
+    end
+    if captured > 0 then
+        local bonus = captured * 100
+        score = score + bonus
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Captured " .. captured .. " enemies inside area (+" .. bonus .. ")") end
+    end
+end
+
+function Game:relocateEnemiesFromClaimedTerritory()
+    -- Move any enemies that are in claimed territory to unclaimed areas
+    for i = #Enemies, 1, -1 do
+        local enemy = Enemies[i]
+        if Grid:isClaimed(enemy.i, enemy.j) then
+            -- Find a new unclaimed position
+            local newPos = self:findUnclaimedPosition()
+            if newPos then
+                enemy.i = newPos.i
+                enemy.j = newPos.j
+                if ok_cfg and Config.debug and Config.debug.enabled then print("Relocated enemy from claimed territory to", newPos.i, newPos.j) end
+            else
+                -- If no unclaimed positions available, remove this enemy
+                table.remove(Enemies, i)
+                if ok_cfg and Config.debug and Config.debug.enabled then print("Removed enemy from claimed territory - no unclaimed positions available") end
             end
         end
     end
-
-    -- Modular: All character-specific stage logic is now handled in characterStageModifier in each character module.
-    -- Remove hardcoded logic for vision, obstacles, etc. from here.
 end
 
-function Game:addScore(points)
-    score = score + points
+function Game:findUnclaimedPosition()
+    local unclaimedPositions = {}
+    for i = 2, Grid.width - 1 do
+        for j = 2, Grid.height - 1 do
+            if not Grid:isClaimed(i, j) then
+                table.insert(unclaimedPositions, {i = i, j = j})
+            end
+        end
+    end
+    
+    if #unclaimedPositions > 0 then
+        return unclaimedPositions[math.random(1, #unclaimedPositions)]
+    end
+    return nil
 end
 
--- Add pause/reset
-local paused = false
-local fps = 0
-local fpsTimer = 0
-local fpsCount = 0
+function Game:createSimpleEnemy()
+    -- Create a simple enemy with basic AI
+    local enemy = {
+        i = 5,
+        j = 5,
+        moveTimer = 0,
+        moveDelay = 0.5 + math.random() * 0.3,
+        lastDirection = {x = 0, y = 0}
+    }
+    
+    -- Place enemy at random UNCLAIMED position (enemies should not be in claimed territory)
+    -- Also avoid spawning too close to player start position
+    local safePositions = {}
+    local playerStartArea = {i = 1, j = math.floor(Grid.nodeHeight / 2)}
+    
+    for i = 2, Grid.width - 1 do
+        for j = 2, Grid.height - 1 do
+            if not Grid:isClaimed(i, j) then -- Fixed: enemies spawn in unclaimed areas
+                -- Don't spawn too close to player start position
+                local distFromPlayerStart = math.abs(i - playerStartArea.i) + math.abs(j - playerStartArea.j)
+                if distFromPlayerStart > 3 then -- Keep at least 3 cells away from player start
+                    table.insert(safePositions, {i = i, j = j})
+                end
+            end
+        end
+    end
+    
+    if #safePositions > 0 then
+        local pos = safePositions[math.random(1, #safePositions)]
+        enemy.i = pos.i
+        enemy.j = pos.j
+        return enemy
+    end
+    
+    return nil
+end
 
-local transitionAlpha = 0
-local transitionDir = 0 -- 1=fade in, -1=fade out
-local transitionCallback = nil
-
-function Game:startTransition(callback)
-    transitionAlpha = 0
-    transitionDir = 1
-    transitionCallback = callback
+function Game:updateEnemy(enemy, dt)
+    enemy.moveTimer = enemy.moveTimer + dt
+    if enemy.moveTimer >= enemy.moveDelay then
+        enemy.moveTimer = 0
+        
+        -- Simple AI: move randomly but prefer continuing in same direction
+        local directions = {{-1,0}, {1,0}, {0,-1}, {0,1}}
+        local chosenDir = nil
+        
+        -- 60% chance to continue in same direction if possible
+        if enemy.lastDirection.x ~= 0 or enemy.lastDirection.y ~= 0 then
+            local continueI = enemy.i + enemy.lastDirection.x
+            local continueJ = enemy.j + enemy.lastDirection.y
+            if Grid:isInside(continueI, continueJ) and not Grid:isClaimed(continueI, continueJ) then -- Fixed: stay in unclaimed areas
+                if math.random() < 0.6 then
+                    chosenDir = enemy.lastDirection
+                end
+            end
+        end
+        
+        -- Otherwise pick a random valid direction
+        if not chosenDir then
+            local validDirs = {}
+            for _, dir in ipairs(directions) do
+                local newI = enemy.i + dir[1]
+                local newJ = enemy.j + dir[2]
+                if Grid:isInside(newI, newJ) and not Grid:isClaimed(newI, newJ) then -- Fixed: move to unclaimed areas only
+                    table.insert(validDirs, {x = dir[1], y = dir[2]})
+                end
+            end
+            
+            if #validDirs > 0 then
+                chosenDir = validDirs[math.random(1, #validDirs)]
+            end
+        end
+        
+        -- Move enemy
+        if chosenDir then
+            enemy.i = enemy.i + chosenDir.x
+            enemy.j = enemy.j + chosenDir.y
+            enemy.lastDirection = chosenDir
+        end
+    end
 end
 
 function Game:update(dt)
-    -- Handle unlock message timer
-    if unlockMessage then
-        unlockMessageTimer = unlockMessageTimer - dt
-        if unlockMessageTimer <= 0 then
-            unlockMessage = nil
+    if gameOver or gameWon then return end
+    
+    gameTime = gameTime + dt
+    
+    -- Update shape challenge preview timer
+    if shapeChallenge.showPreview and shapeChallenge.previewTimer > 0 then
+        shapeChallenge.previewTimer = shapeChallenge.previewTimer - dt
+        if shapeChallenge.previewTimer <= 0 then
+            shapeChallenge.showPreview = false
         end
     end
-    -- Pause and reset controls
-    if love.keyboard.isDown('p') then paused = not paused end
-    if love.keyboard.isDown('r') then self:startTransition(function() self:load() end) end
-    if paused then return end
+    
+    -- Update grid
+    Grid:update(dt)
+    
+    -- Update player (this handles the sophisticated grid-based movement)
+    Player:update(dt, Grid)
+    
+    -- Update shape drawing system
+    self:updateShapeDrawing(dt)
+    -- Update instance draw path animations if any
+    if self.drawPath and self.drawPath.update then self.drawPath:update(dt) end
+    -- Update shape panel
+    if self.shapePanel then self.shapePanel:update(dt) end
+    
+    -- Update shape feedback system
+    ShapeFeedback:update(dt)
+    
+    -- Update enemies
+    for i = #Enemies, 1, -1 do
+        local enemy = Enemies[i]
+        self:updateEnemy(enemy, dt)
+        
+        -- Safety check: if enemy somehow ended up in claimed territory, relocate it
+        if Grid:isClaimed(enemy.i, enemy.j) then
+            local newPos = self:findUnclaimedPosition()
+            if newPos then
+                enemy.i = newPos.i
+                enemy.j = newPos.j
+            else
+                -- Remove enemy if no unclaimed positions available
+                table.remove(Enemies, i)
+            end
+        end
+        
+        -- Only check collisions if enemy still exists
+        if i <= #Enemies then
+            local enemy = Enemies[i]
+            
+            -- Check collision with player
+            local onOuterBorder = (Player.i == 1 or Player.i == Grid.nodeWidth or Player.j == 1 or Player.j == Grid.nodeHeight)
+            if enemy.i == Player.i and enemy.j == Player.j and not onOuterBorder then
+                self:handlePlayerEnemyCollision()
+                break
+            end
+            
+            -- Check if enemy hit player trail (both regular trail and shape drawing)
+            if Player.isDrawing then
+                for _, trailNode in ipairs(Player.trail or {}) do
+                    if enemy.i == trailNode.i and enemy.j == trailNode.j then
+                        if onOuterBorder then break end -- ignore hits while player is on border
+                        self:handleTrailHit()
+                        break
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Spawn more enemies periodically
+    enemySpawnTimer = enemySpawnTimer + dt
+    if enemySpawnTimer >= enemySpawnDelay then
+        enemySpawnTimer = 0
+        enemySpawnDelay = math.max(2.0, enemySpawnDelay - 0.1) -- Spawn faster over time
+        
+        if #Enemies < 8 then -- Max enemy cap
+            local enemy = self:createSimpleEnemy()
+            if enemy then
+                table.insert(Enemies, enemy)
+            end
+        end
+    end
+    
+    -- Check win condition (both territory and shape completion per rules)
+    local claimedPercent = Grid:getClaimedPercent() * 100
+    local requiredTerr = self:getRequiredTerritoryForLevel(level)
+    local requiredAcc = self:getRequiredAccuracyForLevel(level)
+    local territoryComplete = claimedPercent >= requiredTerr
+    local accuracyPct = (self.shapeAccuracy or 0)
+    local shapeOK = (accuracyPct >= requiredAcc) and (currentShapeTemplate and currentShapeTemplate.name == targetShapeId)
+    if territoryComplete and shapeOK then self:handleLevelComplete() end
+end
 
-    -- Handle end of run (win or game over)
-    if gameOver or win then
-        local idx = currentCharacterIdx or 1
-        if not characters[unlockedCharacters[idx]] then idx = 1 end
-        local statsTable = {
-            level = level,
-            characterName = (selectedCharacter and selectedCharacter.name) ~= nil and (selectedCharacter and selectedCharacter.name)
-                or ((Player.character and Player.character.name) ~= nil and (Player.character and Player.character.name))
-                or (characters[unlockedCharacters[idx]].name),
-            claimedPercent = math.floor(Grid:getClaimedPercent()*100),
-            requiredPercent = math.floor(Grid.requiredClaimedPercent*100),
-            areaCleared = (Grid.width-2)*(Grid.height-2),
-            score = score,
-            deaths = deaths,
-            wins = wins,
-            zonesClosed = zonesClosed or 0,
-            abilitiesUsed = Player.abilitiesUsed or 0,
-            bossesDefeated = bossesDefeated or 0,
-            -- outcome is passed as a separate param to EndRun:enter
-        }
-        local currentOutcome = win and "win" or "gameOver"
-        Gamestate.push(EndRun, currentOutcome, statsTable)
+function Game:updateShapeDrawing(dt)
+    if not shapeChallenge.active or shapeChallenge.completed then return end
+    
+    -- Check if player is outside claimed territory (shape drawing zone)
+    local playerInClaimedTerritory = Grid:isClaimed(Player.i, Player.j)
+    
+    -- The Player feeds pixel points directly to self.drawPath; here we only finish/evaluate if needed
+    -- If a finish just happened, the Player already called finishPath; we can evaluate based on returned data
+end
+
+function Game:isPlayerTrailClosed()
+    if not Player.trail or #Player.trail < 3 then return false end
+    
+    local firstPoint = Player.trail[1]
+    local lastPoint = Player.trail[#Player.trail]
+    
+    -- Check if last point is close to first point (closed loop)
+    local distance = math.abs(firstPoint.i - lastPoint.i) + math.abs(firstPoint.j - lastPoint.j)
+    return distance <= 1
+end
+
+function Game:evaluateShapeDrawing(drawData)
+    if not currentShapeTemplate or not drawData then return end
+    -- Rule: at least one vertex touches claimed or border (safe area)
+    local function touchesSafe()
+        if not drawData.points or #drawData.points == 0 then return false end
+        for _, pt in ipairs(drawData.points) do
+            -- Convert pixel to nearest node indices
+            local ni = math.floor((pt.x - Grid.offsetX) / Grid.cellSize + 0.5) + 1
+            local nj = math.floor((pt.y - Grid.offsetY) / Grid.cellSize + 0.5) + 1
+            -- Clamp
+            ni = math.max(1, math.min(Grid.nodeWidth, ni))
+            nj = math.max(1, math.min(Grid.nodeHeight, nj))
+            -- Border nodes are safe, or adjacent claimed cells
+            if ni == 1 or nj == 1 or ni == Grid.nodeWidth or nj == Grid.nodeHeight then
+                return true
+            end
+            local ci = math.min(ni, Grid.width)
+            local cj = math.min(nj, Grid.height)
+            if Grid:isClaimed(ci, cj) then return true end
+            -- Check 4-neighborhood for claimed
+            if Grid:isClaimed(ci-1, cj) or Grid:isClaimed(ci+1, cj) or Grid:isClaimed(ci, cj-1) or Grid:isClaimed(ci, cj+1) then
+                return true
+            end
+        end
+        return false
+    end
+    if not touchesSafe() then
+        -- Post a brief warning and ignore this attempt
+        Player.failedClosureWarning = 1.8
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Closure invalid: finish on safe area (border or claimed) required") end
         return
     end
-
-    -- Handle transition fade
-    if transitionDir ~= 0 then
-        transitionAlpha = transitionAlpha + transitionDir * dt * 2.2
-        if transitionDir == 1 and transitionAlpha >= 1 then
-            transitionAlpha = 1
-            transitionDir = -1
-            if transitionCallback then transitionCallback() end
-        elseif transitionDir == -1 and transitionAlpha <= 0 then
-            transitionAlpha = 0
-            transitionDir = 0
-            transitionCallback = nil
+    
+    -- Count nearby enemies for risk bonus
+    local nearbyEnemies = 0
+    for _, enemy in ipairs(Enemies) do
+        local distance = math.abs(enemy.i - Player.i) + math.abs(enemy.j - Player.j)
+        if distance <= 5 then -- Within 5 grid cells
+            nearbyEnemies = nearbyEnemies + 1
         end
     end
+    
+    -- Create game context for scoring
+    local gameContext = {
+        template = currentShapeTemplate,
+        enemiesNearby = nearbyEnemies,
+        level = level
+    }
+    
+    -- Match the drawn shape to the template
+    local matchResult = ShapeMatcher:matchShape(drawData, currentShapeTemplate)
+    
+    -- Calculate base score
+    local scoreResult = ShapeScore:calculateShapeScore(matchResult, drawData, gameContext)
 
+    -- Combo for repeating same shape consecutively
+    local shapeName = currentShapeTemplate and currentShapeTemplate.name or "?"
+    if self._lastShapeName == shapeName then
+        local count = (self._shapeCombo[shapeName] or 1) + 1
+        self._shapeCombo[shapeName] = count
+        self._comboMultiplier = math.min(3.0, 1.0 + 0.15 * (count - 1)) -- +15% per repeat, max 3.0x
+    else
+        self._shapeCombo[shapeName] = 1
+        self._comboMultiplier = 1.0
+    end
+    self._lastShapeName = shapeName
+
+    -- Speed bonus for fast drawings (< 2s gives up to +25%)
+    local speedBonusMult = 1.0
+    if drawData.drawTime and drawData.drawTime > 0 then
+        if drawData.drawTime <= 2.0 then
+            speedBonusMult = 1.25
+        elseif drawData.drawTime <= 3.0 then
+            speedBonusMult = 1.15
+        elseif drawData.drawTime <= 5.0 then
+            speedBonusMult = 1.05
+        end
+    end
+    local totalMult = self._comboMultiplier * speedBonusMult
+    scoreResult.totalScore = math.floor(scoreResult.totalScore * totalMult)
+    
     -- Update game state
-    elapsedTime = love.timer.getTime() - startTime
-    Grid:update(dt)
-
-    -- Update Freeze powerup effect
-    if PowerUps.Freeze then
-        PowerUps.Freeze:update(dt, self, Grid, Player, enemies)
+    shapeChallenge.result = scoreResult
+    shapeChallenge.completed = true
+    shapeScore = shapeScore + scoreResult.totalScore
+    -- Track accuracy/stars for UI
+    self.shapeAccuracy = math.floor((matchResult.accuracy or 0) * 100)
+    -- Only increment stars when matching current target with required accuracy
+    if (currentShapeTemplate and currentShapeTemplate.name == targetShapeId) and (self.shapeAccuracy >= self:getRequiredAccuracyForLevel(level)) then
+        local cur = ShapeFeedback:getStarCount() or 0
+        ShapeFeedback:setStars(math.min(3, cur + 1))
     end
-
-    -- FPS counter
-    fpsTimer = fpsTimer + dt
-    fpsCount = fpsCount + 1
-    if fpsTimer >= 1 then
-        fps = fpsCount
-        fpsCount = 0
-        fpsTimer = fpsTimer - 1
+    self.shapeStarsEarned = ShapeFeedback:getStarCount()
+    self.shapeStarsTarget = 3
+    if self.shapePanel then
+        self.shapePanel:setProgress(self.shapeAccuracy, self.shapeStarsEarned, self.shapeStarsTarget)
+        self.shapePanel:flashSuccess()
     end
-
-    -- Stage-specific update hooks (onslaught, moving obstacles, custom win)
-    local stageIdx = ((level-1) % #stages) + 1
-    local stage = stages[stageIdx]
-    if stage and stage.special then
-        if Grid._onslaughtAddEnemy then
-            Grid._onslaughtAddEnemy(dt, enemiesLib, Grid, enemies)
-        end
-        if Grid._moveObstacles then
-            Grid._moveObstacles(dt, Grid)
-        end
-        if Game.checkWinCondition and Game.checkWinCondition() then
-            win = true
-            wins = wins + 1
-        end
+    
+    -- Update visual feedback system
+    ShapeFeedback:setShapeCompleted(true, matchResult.accuracy)
+    
+    if ok_cfg and Config.debug and Config.debug.enabled then
+        print("Shape drawing completed!")
+        print("Accuracy:", math.floor(matchResult.accuracy * 100) .. "%")
+        print("Grade:", scoreResult.grade)
+        print("Score:", scoreResult.totalScore)
     end
-
-    -- Realm-specific update (e.g., echo effect)
-    if currentRealm and currentRealm.update then
-        currentRealm:update(dt, Grid)
+    if self._comboMultiplier and self._comboMultiplier > 1.0 then
+    if ok_cfg and Config.debug and Config.debug.enabled then print(string.format("Combo x%.2f (streak %d)", self._comboMultiplier, self._shapeCombo[shapeName] or 1)) end
     end
-
-    Player:update(dt, Grid)
-
-    -- Enemy and player collision logic
-    for _, enemy in ipairs(enemies) do
-        if PowerUps.Freeze and PowerUps.Freeze:isEnemyFrozen(enemy) then
-            -- Skip enemy update if frozen
-        else
-            enemy:update(dt, Grid, Player)
-        end
-        -- Check direct collision with player
-        local p_node_i, p_node_j = Player.i, Player.j
-        local cells_around_player_node = {
-            {i = p_node_i - 1, j = p_node_j - 1}, {i = p_node_i, j = p_node_j - 1},
-            {i = p_node_i - 1, j = p_node_j},     {i = p_node_i, j = p_node_j}
-        }
-        for _, cell_coord in ipairs(cells_around_player_node) do
-            if Grid:isInside(cell_coord.i, cell_coord.j) then
-                if enemy.i == cell_coord.i and enemy.j == cell_coord.j then
-                    print("Enemy direct collision with player at node vicinity: PNode("..p_node_i..","..p_node_j..") ECell("..enemy.i..","..enemy.j..")")
-                    gameOver = true; deaths = deaths + 1; break
-                end
-            end
-        end
-        if gameOver then break end
-        -- Check collision with player's active trail
-        if Player.isDrawing and #Player.trail >= 2 then
-            for k = 1, #Player.trail - 1 do
-                local n1 = Player.trail[k]
-                local n2 = Player.trail[k+1]
-                local ei, ej = enemy.i, enemy.j
-                local hit_trail_segment = false
-                if n1.i == n2.i then
-                    if ej == math.min(n1.j, n2.j) then
-                        if ei == n1.i - 1 or ei == n1.i then
-                            hit_trail_segment = true
-                        end
-                    end
-                elseif n1.j == n2.j then
-                    if ei == math.min(n1.i, n2.i) then
-                        if ej == n1.j - 1 or ej == n1.j then
-                            hit_trail_segment = true
-                        end
-                    end
-                end
-                if hit_trail_segment then
-                    print("Enemy collided with player trail segment between N("..n1.i..","..n1.j..") and N("..n2.i..","..n2.j.."). Enemy at C("..ei..","..ej..")")
-                    if Player.fuseShieldActive then
-                        -- Guardian's shield blocks death
-                        Player.fuseShieldActive = false
-                        Player.fuseTimer = 0
-                    elseif not Player.isFuseActive then
-                        -- Start fuse instead of instant death
-                        Player.isFuseActive = true
-                        Player.fuseTimer = Player.fuseDuration or 2.5
-                        Player.burningTrail = {}
-                        for _, node in ipairs(Player.trail) do table.insert(Player.burningTrail, {i=node.i, j=node.j}) end
-                        -- Optional: play fuse sound/flash
-                    end
-                    break
-                end
-            end
-        end
+    if drawData.drawTime then
+    if ok_cfg and Config.debug and Config.debug.enabled then print(string.format("Time: %.2fs (speed mult x%.2f)", drawData.drawTime, speedBonusMult)) end
     end
-    -- Check win condition
-    if Grid:getClaimedPercent() >= Grid.requiredClaimedPercent then
-        win = true
-        wins = wins + 1
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Stars earned:", ShapeFeedback:getStarCount()) end
+    
+    -- Visual/audio feedback
+    self:showShapeResult(scoreResult)
+
+    -- Auto-advance only when both goals satisfied
+    local claimedPercent = Grid:getClaimedPercent() * 100
+    local requiredTerr = self:getRequiredTerritoryForLevel(level)
+    local requiredAcc = self:getRequiredAccuracyForLevel(level)
+    local territoryComplete = claimedPercent >= requiredTerr
+    local shapeOK = (self.shapeAccuracy or 0) >= requiredAcc and (currentShapeTemplate and currentShapeTemplate.name == targetShapeId)
+    if territoryComplete and shapeOK then
+        self:handleLevelComplete()
     end
 end
 
-local glowShader = love.graphics.newShader("shaders/glow.glsl")
-glowShader:send("strength", 0.18)
+function Game:showShapeResult(scoreResult)
+    -- This will be called to show the shape result UI
+    -- For now, just print the result
+    local display = ShapeScore:getScoreDisplay(scoreResult)
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Shape Result:", display.title, "- Score:", scoreResult.totalScore) end
+end
+
+function Game:handlePlayerEnemyCollision()
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Player hit by enemy!") end
+    
+    if Player.isDrawing then
+        -- Cancel current trail
+        Player:cancelTrail(Grid)
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Trail cancelled due to enemy collision") end
+    else
+        -- Player is in safe zone, lose a life
+        livesRemaining = livesRemaining - 1
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Life lost! Lives remaining:", livesRemaining) end
+        
+        if livesRemaining <= 0 then
+            self:handleGameOver()
+        else
+            -- Respawn player at safe position
+            Player.i = 1
+            Player.j = math.floor(Grid.nodeHeight / 2)
+        end
+    end
+end
+
+function Game:handleTrailHit()
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Enemy hit player trail!") end
+    Player:cancelTrail(Grid)
+end
+
+function Game:handleLevelComplete()
+    gameWon = true
+    score = score + 1000 + (level * 500)
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Level", level, "complete! Score:", score) end
+    
+    -- Brief pause then advance
+    love.timer.sleep(0.5)
+    self:advanceLevel()
+end
+
+function Game:advanceLevel()
+    level = level + 1
+    targetPercentage = math.min(85, targetPercentage + 3) -- Increase difficulty
+    
+    -- Reset for next level but keep some progress
+    local keepPercent = 0.4 -- Keep 40% of claimed territory
+    Grid:resetPartial(keepPercent)
+    
+    -- Reset player
+    Player.i = 1  
+    Player.j = math.floor(Grid.nodeHeight / 2)
+    Player.trail = {}
+    Player.isDrawing = false
+    
+    -- Clear enemies and spawn new ones
+    Enemies = {}
+    enemySpawnDelay = math.max(1.5, 3.0 - level * 0.2) -- Faster spawning
+    self:spawnEnemiesForLevel()
+    
+    -- Reset shape feedback for new level
+    ShapeFeedback:reset()
+    ShapeFeedback:setStars(0)
+    
+    -- Load new shape template for this level
+    self:loadLevelShape()
+    -- Update HUD requirement for new level
+    Grid:setRequiredClaimedPercent(self:getRequiredTerritoryForLevel(level) / 100)
+    
+    gameWon = false
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Advanced to level", level, "- New target:", targetPercentage .. "%") end
+    _G.currentLevel = level
+end
+
+-- Load/refresh shape for the current level and update UI panel
+function Game:loadLevelShape()
+    currentShapeTemplate = ShapeTemplates:getShapeForLevel(level)
+    if currentShapeTemplate then
+    targetShapeId = currentShapeTemplate.name
+        if self.shapePanel then
+            self.shapePanel:setTemplate(currentShapeTemplate.name, currentShapeTemplate.points, currentShapeTemplate.requiredAccuracy or self:getRequiredAccuracyForLevel(level))
+        end
+    end
+end
+
+-- Difficulty scaling rules
+function Game:getRequiredAccuracyForLevel(levelNumber)
+    return math.min(95, 80 + (levelNumber - 1) * 2)
+end
+
+function Game:getRequiredTerritoryForLevel(levelNumber)
+    -- Start at 75%, +2% per level, cap at 85%
+    return math.min(85, 75 + (levelNumber - 1) * 2)
+end
+
+function Game:handleGameOver()
+    gameOver = true
+    if ok_cfg and Config.debug and Config.debug.enabled then print("Game Over! Final Score:", score) end
+end
 
 function Game:draw()
-    love.graphics.setShader(glowShader)
+    -- Draw grid (includes territory and trails)
     Grid:draw()
-    Player:draw(Grid)
-    for _, enemy in ipairs(enemies) do
-        enemy:draw(Grid)
+    
+    -- Draw shape template if shape challenge is active
+    if self.shapeChallenge and self.shapeChallenge.active and currentShapeTemplate then
+        self:drawShapeTemplateWithFeedback()
     end
-    -- Draw powerups on grid
-    if Grid.powerups then
-        for _, powerup in ipairs(Grid.powerups) do
-            if not powerup.collected then
-                powerup:draw(Grid)
-            end
+    
+    -- Draw player's drawing path (instance)
+    if self.drawPath and self.drawPath.draw and self.debugDrawPath then self.drawPath:draw() end
+    
+    -- Draw enemies (boss is larger and purple)
+    for _, enemy in ipairs(Enemies) do
+        local x = Grid.offsetX + (enemy.i - 1) * Grid.cellSize + Grid.cellSize/2
+        local y = Grid.offsetY + (enemy.j - 1) * Grid.cellSize + Grid.cellSize/2
+        if enemy.isBoss then
+            love.graphics.setColor(0.7, 0.2, 1.0, 1)
+            love.graphics.circle("fill", x, y, math.max(6, Grid.cellSize * 0.45))
+        else
+            love.graphics.setColor(0.9, 0.2, 0.2, 1) -- Red
+            love.graphics.circle("fill", x, y, math.max(3, Grid.cellSize * 0.33))
         end
     end
-    love.graphics.setShader()
-    self:drawUI()
-    -- Draw transition overlay
-    if transitionAlpha > 0 then
-        love.graphics.setColor(0,0,0,transitionAlpha)
-        love.graphics.rectangle('fill', 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
-        love.graphics.setColor(1,1,1,1)
+    
+    -- Draw player (use existing Player system if available)
+    if Player.draw then
+        Player:draw(Grid)
+    else
+        -- Fallback player rendering
+        local x = Grid.offsetX + (Player.i - 1) * Grid.cellSize + Grid.cellSize/2  
+        local y = Grid.offsetY + (Player.j - 1) * Grid.cellSize + Grid.cellSize/2
+        love.graphics.setColor(1, 1, 1, 1) -- White
+        love.graphics.circle("fill", x, y, Grid.cellSize/2)
     end
-    -- Remove UI overlays from here (jammed tint, floating text, ability bar, unlock message)
-    -- ...rest of draw logic...
+    
+    -- Stats -> right-side panel only (no on-grid text)
+    self:collectAndSendStats()
+    -- Overlay HUD (warnings, ability bar, etc.)
+    if IngameHUD and IngameHUD.draw then
+        IngameHUD:draw(self, Player, Grid, self.powerups, nil)
+    end
+    
+    -- Optionally draw any shape challenge overlays (kept minimal)
+    -- Draw shape panel on the right
+    if self.shapePanel then self.shapePanel:draw() end
+    
+    -- Draw game over/win screen
+    if gameOver then
+        self:drawGameOverScreen()
+    elseif gameWon then
+        self:drawLevelCompleteScreen()
+    end
 end
 
-local showAbilities = false
-
--- In the drawUI or HUD logic, show the correct stage number and claimed percent for the current stage.
-function Game:drawUI()
-    local stageIdx = ((level-1) % #stages) + 1
-    local stage = stages[stageIdx]
-    local claimed = math.floor(Grid:getClaimedPercent()*100)
-    local required = math.floor(Grid.requiredClaimedPercent*100)
-    local stageText = string.format("Level %d  Claimed: %d/%d%%", level, claimed, required)
-    love.graphics.setColor(0,0,0,0.7)
-    love.graphics.rectangle('fill', love.graphics.getWidth()/2-110, 10, 220, 32, 8, 8)
-    love.graphics.setColor(1,1,1,1)
-    love.graphics.setFont(love.graphics.newFont(18))
-    love.graphics.printf(stageText, love.graphics.getWidth()/2-100, 16, 200, 'center')
-    -- Show passive abilities for the current character only if toggled
-    if showAbilities and Player.character and Player.character.getSkillDescription then
-        love.graphics.setFont(love.graphics.newFont(14))
-        love.graphics.setColor(0.1,0.1,0.1,0.7)
-        love.graphics.rectangle('fill', 10, 10, 320, 60, 8, 8)
-        love.graphics.setColor(0.7,1,0.7,1)
-        love.graphics.printf("Passive Abilities:", 20, 16, 300, 'left')
-        love.graphics.setColor(1,1,1,1)
-        love.graphics.printf(Player.character:getSkillDescription(), 20, 36, 300, 'left')
+-- Aggregate gameplay stats and push to the right-side panel
+function Game:collectAndSendStats()
+    if not self.shapePanel then return end
+    local claimedPercent = math.floor((Grid:getClaimedPercent() or 0) * 100)
+    local requiredTerr = self:getRequiredTerritoryForLevel(level)
+    local requiredAcc = self:getRequiredAccuracyForLevel(level)
+    local stats = {
+        level = level,
+        target = currentShapeTemplate and currentShapeTemplate.name or 'Triangle',
+        requiredAcc = requiredAcc,
+        claimed = claimedPercent,
+        requiredClaimed = requiredTerr,
+        shapeAcc = self.shapeAccuracy or 0,
+        lives = livesRemaining,
+        enemies = #Enemies,
+        time = math.floor(gameTime),
+        score = score,
+        combo = self._comboMultiplier or 1.0
+    }
+    if self.shapePanel.setStats then
+        self.shapePanel:setStats(stats)
     end
-    -- Debug overlay: FPS and zone state
-    love.graphics.setFont(love.graphics.newFont(12))
-    love.graphics.setColor(0.2,1,0.2,0.7)
-    love.graphics.print('FPS: '..tostring(fps), 10, love.graphics.getHeight()-24)
-    love.graphics.setColor(0.2,0.7,1,0.7)
-    love.graphics.print('Claimed: '..math.floor(Grid:getClaimedPercent()*100)..'%', 90, love.graphics.getHeight()-24)
-    love.graphics.setColor(1,1,1,1)
-    -- ...existing code for ability bar, overlays, etc...
-    -- Show hint for toggling abilities
-    love.graphics.setFont(love.graphics.newFont(12))
-    love.graphics.setColor(1,1,1,0.7)
-    love.graphics.printf("Press TAB or H to show/hide abilities", 12, 76, 300, 'left')
+end
+
+function Game:drawGameOverScreen()
+    local screenWidth, screenHeight = love.graphics.getDimensions()
+    
+    -- Overlay
+    love.graphics.setColor(0, 0, 0, 0.8)
+    love.graphics.rectangle("fill", 0, 0, screenWidth, screenHeight)
+    
+    -- Game Over text
+    love.graphics.setColor(1, 0.2, 0.2, 1)
+    love.graphics.printf("GAME OVER", 0, screenHeight/2 - 40, screenWidth, "center")
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.printf("Final Score: " .. score, 0, screenHeight/2, screenWidth, "center")
+    love.graphics.printf("Press R to restart or ESC for menu", 0, screenHeight/2 + 40, screenWidth, "center")
+end
+
+function Game:drawShapeTemplateWithFeedback()
+    if not currentShapeTemplate then return end
+    
+    -- Position the template on the right side of the screen
+    local screenWidth = love.graphics.getWidth()
+    local templateX = screenWidth - 200
+    local templateY = 20
+    local scale = 1.0
+    
+    -- Draw stars above the template
+    ShapeFeedback:drawStars(templateX, templateY, scale)
+    
+    -- Draw the template with current feedback state
+    ShapeFeedback:drawShapeTemplate(currentShapeTemplate, templateX, templateY + 30, scale)
+end
+
+function Game:drawShapeTemplate()
+    -- Legacy function - redirects to new feedback system
+    self:drawShapeTemplateWithFeedback()
+end
+
+function Game:drawShapePath()
+    local currentPath = DrawPathSystem.getCurrentPath()
+    if not currentPath or #currentPath < 2 then
+        return
+    end
+    
+    love.graphics.setColor(1, 1, 0, 0.8) -- Yellow, semi-transparent
+    love.graphics.setLineWidth(3)
+    
+    -- Draw the path lines
+    for i = 1, #currentPath - 1 do
+        local p1 = currentPath[i]
+        local p2 = currentPath[i + 1]
+        local x1 = Grid.offsetX + p1.i * Grid.cellSize
+        local y1 = Grid.offsetY + p1.j * Grid.cellSize
+        local x2 = Grid.offsetX + p2.i * Grid.cellSize
+        local y2 = Grid.offsetY + p2.j * Grid.cellSize
+        love.graphics.line(x1, y1, x2, y2)
+    end
+    
+    love.graphics.setLineWidth(1) -- Reset line width
+end
+
+function Game:drawShapeChallengeUI()
+    if not self.shapeChallenge or not self.shapeChallenge.active then
+        return
+    end
+    
+    love.graphics.setColor(1, 1, 1, 1)
+    local screenWidth = love.graphics.getWidth()
+    
+    -- Draw simple instruction at the bottom
+    local instruction = "Draw the shape shown on the right!"
+    if ShapeFeedback:isCompleted() then
+        instruction = "Shape completed! " .. ShapeFeedback:getStarCount() .. " stars earned!"
+        love.graphics.setColor(0.2, 1, 0.2, 1) -- Green for success
+    end
+    
+    love.graphics.setFont(love.graphics.newFont(16))
+    love.graphics.printf(instruction, 0, love.graphics.getHeight() - 80, screenWidth, "center")
+    love.graphics.setColor(1, 1, 1, 1) -- Reset color
+end
+
+function Game:drawLevelCompleteScreen()
+    local screenWidth, screenHeight = love.graphics.getDimensions()
+    
+    -- Overlay
+    love.graphics.setColor(0, 0.2, 0, 0.8)
+    love.graphics.rectangle("fill", 0, 0, screenWidth, screenHeight)
+    
+    -- Level Complete text
+    love.graphics.setColor(0.2, 1, 0.2, 1)
+    love.graphics.printf("LEVEL " .. (level-1) .. " COMPLETE!", 0, screenHeight/2 - 40, screenWidth, "center")
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.printf("Score: " .. score, 0, screenHeight/2, screenWidth, "center")
+    love.graphics.printf("Advancing to Level " .. level .. "...", 0, screenHeight/2 + 40, screenWidth, "center")
 end
 
 function Game:keypressed(key)
-    if key == 'p' then paused = not paused end
-    if key == 'r' then self:startTransition(function() self:load() end) end
-    -- Quick restart: Enter/Space on end screen
-    if (gameOver or win) and (key == 'return' or key == 'space') then
-        self:startTransition(function()
-            level = 1
-            deaths = 0
-            wins = 0
-            score = 0
-            zonesClosed = 0
-            bossesDefeated = 0
-            Player.abilitiesUsed = 0
-            self:load()
-        end)
-    end
-    if key == 'tab' or key == 'h' then
-        showAbilities = not showAbilities
-    end
-    -- All keypress logic for win/gameOver states is now in EndRun:keypressed
-end
-
-function Game:unlockCharacter(idx)
-    -- Check if the character (by index) is already conceptually unlocked
-    local alreadyUnlocked = false
-    for _, unlockedIdx in ipairs(unlockedCharacters) do
-        if unlockedIdx == idx then
-            alreadyUnlocked = true
-            break
-        end
-    end
-    if not alreadyUnlocked then
-        table.insert(unlockedCharacters, idx)
-        -- Potentially provide feedback to the player here if desired
-        print("Unlocked character at index: " .. idx)
+    if key == "escape" then
+        local Menu = require 'src.ui.menu'
+        Gamestate.switch(Menu)
+    elseif key == "r" and gameOver then
+        level = 1
+        score = 0
+        self:initializeGame()
     end
 end
 
--- Modified to accept character object
-function Game:selectCharacter(character_obj)
-    if character_obj then
-        selectedCharacter = character_obj
-        _G.selectedCharacter = character_obj
-        print("Character selected: " .. (character_obj.name or "Unknown"))
-        for i, char in ipairs(characters) do
-            if char == character_obj then
-                currentCharacterIdx = i
-                break
-            end
-        end
-    else
-        print("Error: Attempted to select a nil character.")
+function Game:resize(w, h)
+    local rightPanePx = math.floor(math.max(260, math.min(380, 0.22 * w)))
+    Grid:setSizeToWindow(w, h, 16, rightPanePx)
+    if self.shapePanel then
+        local panelW = 220
+        local panelX = w - rightPanePx + 10
+        self.shapePanel.x = panelX
+        self.shapePanel.y = 16
+        self.shapePanel.w = panelW
     end
+    if self.drawPath then self.drawPath.grid = Grid end
 end
-
--- New function to accept realm object
-function Game:selectRealm(realm_obj)
-    if realm_obj then
-        selectedRealm = realm_obj
-        currentRealm = realm_obj
-        print("Realm selected: " .. (realm_obj.name or "Unknown"))
-    else
-        print("Error: Attempted to select a nil realm.")
-    end
-end
-
--- Utility: check if a character is unlocked
-function Game:isCharacterUnlocked(idx)
-    for _, unlockedIdx in ipairs(unlockedCharacters) do
-        if unlockedIdx == idx then return true end
-    end
-    return false
-end
-
--- Utility: get character index from object
-function Game:getCharacterIndex(character_obj)
-    for i, char in ipairs(characters) do
-        if char == character_obj then return i end
-    end
-    return 1 -- fallback to first
-end
-
--- In Player:update(dt, Grid):
--- If Player.isJammed, reduce speed
-if Player.isJammed then
-    Player.speedModifier = 0.6
-elseif Player.speedModifier and Player.speedModifier ~= 1 then
-    Player.speedModifier = 1
-end
-
--- Add: Give each character a passive bonus (example: speed, score, etc.)
-function Game:applyCharacterPassives()
-    if not Player.character then return end
-    if Player.character.name == "Trickster" then
-        Player.speed = (Player.baseSpeed or 1) * 1.15
-    elseif Player.character.name == "Guardian" then
-        Player.maxLives = 2
-    elseif Player.character.name == "Echo" then
-        Player.trailLengthBonus = 2
-    elseif Player.character.name == "Sprinter" then
-        Player.speed = (Player.baseSpeed or 1) * 1.25
-    elseif Player.character.name == "Scorer" then
-        Player.scoreMultiplier = 1.5
-    else
-        -- Default/Architect
-        Player.speed = Player.baseSpeed or 1
-        Player.maxLives = 1
-        Player.trailLengthBonus = 0
-        Player.scoreMultiplier = 1
-    end
-end
-
--- Add: Show character passive in stats panel
-function Game:getCharacterPassiveDescription(character)
-    if not character then return "" end
-    if character.name == "Trickster" then
-        return "+15% speed"
-    elseif character.name == "Guardian" then
-        return "+1 extra life"
-    elseif character.name == "Echo" then
-        return "+2 trail length"
-    elseif character.name == "Sprinter" then
-        return "+25% speed"
-    elseif character.name == "Scorer" then
-        return "1.5x score"
-    else
-        return "Balanced"
-    end
-end
-
--- Expose characterUnlockLevels to other modules (for select_character.lua to show unlock info).
-Game.characterUnlockLevels = characterUnlockLevels
-
--- Define PowerUps table at the top of game.lua so it is available for stage powerup spawning.
-local Freeze = require('src.powerups.freeze')
-local PowerUps = { SpeedBoost = require('src.powerups.speed_boost'), Freeze = Freeze }
-
--- Add: Show which character will unlock at the next boss level
-function Game:getNextUnlockInfo()
-    local nextLevel, nextIdx = nil, nil
-    for idx, unlockLevel in pairs(characterUnlockLevels) do
-        if not self:isCharacterUnlocked(idx) and (not nextLevel or unlockLevel < nextLevel) and unlockLevel >= level then
-            nextLevel = unlockLevel
-            nextIdx = idx
-        end
-    end
-    if nextLevel and nextIdx then
-        return nextLevel, characters[nextIdx] and characters[nextIdx].name or ("Character #"..nextIdx)
-    end
-    return nil, nil
-end
-
-_G.PowerUps = PowerUps
 
 return Game

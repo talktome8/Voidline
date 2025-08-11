@@ -77,3 +77,27 @@ Track changes and milestones with git commits tagged by phase.
 Mark completed tasks and sync with README checklist regularly.
 
 Let the void be closed, line by line.
+
+
+---
+
+Current scope (recent work and next steps)
+
+Done
+- Clamp movement/draw-path to grid nodes; reserve right UI pane
+- Dynamic cell size, stroke width scaling, and resize support
+- Single source of truth for target shape; stars gated by required accuracy
+- Dual-goal advance: required territory + required shape accuracy
+- Border safety and finish-on-safe validation
+- Robust closure and flood fill guards; enemy relocation from claimed
+- Enemy scaling per level; boss every 5th level; +1 life on boss capture
+- Capture rewards: +score per enemy captured in area
+
+In progress
+- Touch input: smoothing, dead zone, and swipe tolerance
+
+Planned
+- Enemy AI variety and boss telegraphs
+- Sound pass; wire missing SFX and mix levels
+- Mobile layout polish (bigger hit targets, margins)
+- Tests for shape scoring edge cases

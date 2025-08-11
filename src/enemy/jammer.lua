@@ -9,7 +9,7 @@ function Jammer:new(i, j, level)
     e.moveDelay = 1.2 -- always fair, never too fast
     e.moveTimer = 0
     e.level = level or 1
-    print('DEBUG: Jammer:new - level:', level, 'moveDelay:', e.moveDelay)
+    do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then print('DEBUG: Jammer:new - level:', level, 'moveDelay:', e.moveDelay) end end
     return e
 end
 
