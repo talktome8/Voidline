@@ -39,6 +39,8 @@ local livesRemaining = 3
 local enemySpawnTimer = 0
 local enemySpawnDelay = 3.0
 local Enemies = {}
+-- UI toast for quick messages
+local toast = { msg = nil, timer = 0 }
 
 -- Shape Challenge State
 local currentShapeTemplate = nil
@@ -443,6 +445,15 @@ function Game:update(dt)
             end
         end
     end
+
+    -- Update toast timer
+    if toast.timer and toast.timer > 0 then
+        toast.timer = toast.timer - dt
+        if toast.timer <= 0 then
+            toast.timer = 0
+            toast.msg = nil
+        end
+    end
     
     -- Check win condition (both territory and shape completion per rules)
     local claimedPercent = Grid:getClaimedPercent() * 100
@@ -771,6 +782,25 @@ function Game:draw()
     elseif gameWon then
         self:drawLevelCompleteScreen()
     end
+
+    -- Draw toast message last
+    if toast.msg and toast.timer and toast.timer > 0 then
+        local w, h = love.graphics.getDimensions()
+        local padding = 8
+        local text = toast.msg
+        local prev = love.graphics.getFont()
+        local font = love.graphics.newFont(14)
+        love.graphics.setFont(font)
+        local tw = font:getWidth(text)
+        local th = font:getHeight()
+        local bx = 10
+        local by = h - th - 20
+        love.graphics.setColor(0, 0, 0, 0.6)
+        love.graphics.rectangle('fill', bx - padding, by - padding, tw + padding*2, th + padding*2, 6, 6)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.print(text, bx, by)
+        if prev then love.graphics.setFont(prev) end
+    end
 end
 
 -- Aggregate gameplay stats and push to the right-side panel
@@ -899,15 +929,8 @@ function Game:keypressed(key)
         -- Runtime debug toggle
         if ok_cfg and Config.debug then
             Config.debug.enabled = not Config.debug.enabled
-            local msg = Config.debug.enabled and "Debug: ON" or "Debug: OFF"
-            -- Brief on-screen toast
-            love.graphics.setColor(0,0,0,0.6)
-            love.graphics.rectangle('fill', 10, 10, 130, 28, 6, 6)
-            love.graphics.setColor(1,1,1,1)
-            local prev = love.graphics.getFont()
-            love.graphics.setFont(love.graphics.newFont(14))
-            love.graphics.print(msg, 18, 16)
-            if prev then love.graphics.setFont(prev) end
+            toast.msg = Config.debug.enabled and "Debug: ON" or "Debug: OFF"
+            toast.timer = 1.5
         end
     elseif key == "r" and gameOver then
         level = 1
