@@ -379,15 +379,12 @@ function Player:update(dt, grid)
             local prev_node_i, prev_node_j = self.i, self.j
             local next_node_i, next_node_j = self.i + dx_node, self.j + dy_node
 
-            -- Clamp movement to playable node area
-            local function clampNode(i, j)
-                i = math.max(1, math.min(grid.nodeWidth, i))
-                j = math.max(1, math.min(grid.nodeHeight, j))
-                return i, j
-            end
-            next_node_i, next_node_j = clampNode(next_node_i, next_node_j)
+            -- ENHANCED: Prevent diagonal out-of-bounds movement
+            -- Clamp movement to playable node area BEFORE any other checks
+            next_node_i = math.max(1, math.min(grid.nodeWidth, next_node_i))
+            next_node_j = math.max(1, math.min(grid.nodeHeight, next_node_j))
 
-            -- Bounds checking
+            -- Bounds checking (redundant but kept for safety)
             if next_node_i >= 1 and next_node_i <= grid.nodeWidth and 
                next_node_j >= 1 and next_node_j <= grid.nodeHeight then
                 

@@ -23,6 +23,13 @@
 			"command": "love .",
 			"isBackground": false,
 			"group": "build"
+		},
+		{
+			"label": "Run Love2D",
+			"type": "shell",
+			"command": "love .",
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

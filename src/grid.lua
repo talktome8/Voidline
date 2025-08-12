@@ -23,6 +23,7 @@ if not cellColors then
     cellColors = {
         empty = {0.1, 0.1, 0.15, 1.0},
         claimed = {0.2, 0.6, 1.0, 0.8},
+        target_completed = {0.2, 1.0, 0.2, 0.9}, -- Bright green for completed target shapes
         trail = {0.3, 0.8, 1.0, 0.9},
         player = {1.0, 1.0, 1.0, 1.0},
         enemy = {0.9, 0.2, 0.2, 1.0},
@@ -1129,6 +1130,37 @@ function Grid:resetPartial(keepPercent)
     end
     
     if Config and Config.debug and Config.debug.enabled then print("Grid partially reset - kept", numToKeep, "out of", #claimedCells, "claimed cells") end
+end
+
+-- Mark cells in a specific area as completed target shape (green)
+function Grid:markTargetShapeCompleted(cellTrail)
+    if not cellTrail or #cellTrail == 0 then return end
+    
+    -- Find the bounding box of the drawn shape
+    local minI, maxI = cellTrail[1].i, cellTrail[1].i
+    local minJ, maxJ = cellTrail[1].j, cellTrail[1].j
+    
+    for _, cell in ipairs(cellTrail) do
+        minI = math.min(minI, cell.i)
+        maxI = math.max(maxI, cell.i)
+        minJ = math.min(minJ, cell.j)
+        maxJ = math.max(maxJ, cell.j)
+    end
+    
+    -- Mark all claimed cells within the bounding box as target_completed
+    for i = minI, maxI do
+        for j = minJ, maxJ do
+            if self.cells[i] and self.cells[i][j] == 'claimed' then
+                -- Use simple point-in-polygon check or just mark the general area
+                self.cells[i][j] = 'target_completed'
+            end
+        end
+    end
+    
+    if Config and Config.debug and Config.debug.enabled then
+        local area = (maxI - minI + 1) * (maxJ - minJ + 1)
+        print("Marked target shape area as green - bounding box:", minI, minJ, "to", maxI, maxJ, "area:", area)
+    end
 end
 
 return Grid

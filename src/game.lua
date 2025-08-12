@@ -455,6 +455,16 @@ function Game:update(dt)
         end
     end
     
+    -- Handle delayed level completion from target shape success
+    if self._levelCompletionDelay and self._levelCompletionDelay > 0 then
+        self._levelCompletionDelay = self._levelCompletionDelay - dt
+        if self._levelCompletionDelay <= 0 then
+            self._levelCompletionDelay = nil
+            self:handleLevelComplete()
+            return -- Skip other updates during transition
+        end
+    end
+    
     -- Check win condition (both territory and shape completion per rules)
     local claimedPercent = Grid:getClaimedPercent() * 100
     local requiredTerr = self:getRequiredTerritoryForLevel(level)
@@ -519,6 +529,44 @@ function Game:evaluateShapeDrawing(drawData)
         return
     end
     
+    -- ENHANCED: Strict validation to prevent false shape success
+    local function isValidShape()
+        -- Minimum complexity check
+        if not drawData.points or #drawData.points < 4 then
+            if ok_cfg and Config.debug and Config.debug.enabled then print("Shape too simple:", #(drawData.points or {}), "points (need 4+)") end
+            return false
+        end
+        
+        -- Must form a closed loop (start and end near each other)
+        local firstPt = drawData.points[1]
+        local lastPt = drawData.points[#drawData.points]
+        if firstPt and lastPt then
+            local distance = math.sqrt((firstPt.x - lastPt.x)^2 + (firstPt.y - lastPt.y)^2)
+            if distance > Grid.cellSize * 3 then -- Allow some tolerance
+                if ok_cfg and Config.debug and Config.debug.enabled then print("Shape not closed: distance", math.floor(distance), "(max", Grid.cellSize * 3, ")") end
+                return false
+            end
+        end
+        
+        -- Must have meaningful area (not just a line)
+        local minArea = Grid.cellSize * Grid.cellSize * 4  -- At least 4 cell areas
+        if (drawData.boundingBox and drawData.boundingBox.width and drawData.boundingBox.height) then
+            local area = drawData.boundingBox.width * drawData.boundingBox.height
+            if area < minArea then
+                if ok_cfg and Config.debug and Config.debug.enabled then print("Shape area too small:", math.floor(area), "(need", minArea, ")") end
+                return false
+            end
+        end
+        
+        return true
+    end
+    
+    if not isValidShape() then
+        Player.failedClosureWarning = 1.8
+        if ok_cfg and Config.debug and Config.debug.enabled then print("Shape validation failed - invalid shape drawn") end
+        return
+    end
+    
     -- Count nearby enemies for risk bonus
     local nearbyEnemies = 0
     for _, enemy in ipairs(Enemies) do
@@ -573,10 +621,26 @@ function Game:evaluateShapeDrawing(drawData)
     shapeScore = shapeScore + scoreResult.totalScore
     -- Track accuracy/stars for UI
     self.shapeAccuracy = math.floor((matchResult.accuracy or 0) * 100)
-    -- Only increment stars when matching current target with required accuracy
+    -- ENHANCED: Precise Star Rewards based on accuracy tiers
     if (currentShapeTemplate and currentShapeTemplate.name == targetShapeId) and (self.shapeAccuracy >= self:getRequiredAccuracyForLevel(level)) then
-        local cur = ShapeFeedback:getStarCount() or 0
-        ShapeFeedback:setStars(math.min(3, cur + 1))
+        local newStars = 0
+        -- Star tiers: 80-89% = 1 star, 90-95% = 2 stars, 96%+ = 3 stars
+        if self.shapeAccuracy >= 96 then
+            newStars = 3
+        elseif self.shapeAccuracy >= 90 then
+            newStars = 2
+        elseif self.shapeAccuracy >= self:getRequiredAccuracyForLevel(level) then
+            newStars = 1
+        end
+        
+        -- Only award stars if better than current
+        local currentStars = ShapeFeedback:getStarCount() or 0
+        if newStars > currentStars then
+            ShapeFeedback:setStars(newStars)
+            if ok_cfg and Config.debug and Config.debug.enabled then 
+                print("NEW STAR RECORD! Earned", newStars, "stars with", self.shapeAccuracy, "% accuracy")
+            end
+        end
     end
     self.shapeStarsEarned = ShapeFeedback:getStarCount()
     self.shapeStarsTarget = 3
@@ -587,6 +651,34 @@ function Game:evaluateShapeDrawing(drawData)
     
     -- Update visual feedback system
     ShapeFeedback:setShapeCompleted(true, matchResult.accuracy)
+    
+    -- ENHANCED: Mark target shape area in green when successfully completed
+    if (currentShapeTemplate and currentShapeTemplate.name == targetShapeId) and 
+       (self.shapeAccuracy >= self:getRequiredAccuracyForLevel(level)) and
+       Player and Player.trail and #Player.trail > 0 then
+        -- Convert node trail to cell trail for green highlighting
+        local cellTrail = {}
+        for _, node in ipairs(Player.trail) do
+            local cellI = math.min(node.i, Grid.width)
+            local cellJ = math.min(node.j, Grid.height)
+            table.insert(cellTrail, {i = cellI, j = cellJ})
+        end
+        Grid:markTargetShapeCompleted(cellTrail)
+        if ok_cfg and Config.debug and Config.debug.enabled then print("Marked target shape area as GREEN!") end
+        
+        -- ENHANCED: Auto-advance to next level when target shape is completed successfully
+        local claimedPercent = Grid:getClaimedPercent() * 100
+        local requiredTerr = self:getRequiredTerritoryForLevel(level)
+        if claimedPercent >= requiredTerr then
+            -- Both territory and shape objectives met - advance immediately
+            self._levelCompletionDelay = 2.0  -- Brief celebration delay
+            if ok_cfg and Config.debug and Config.debug.enabled then print("LEVEL COMPLETE! Auto-advancing in 2 seconds...") end
+        else
+            if ok_cfg and Config.debug and Config.debug.enabled then 
+                print("Target shape completed! Need", requiredTerr - claimedPercent, "% more territory to advance") 
+            end
+        end
+    end
     
     if ok_cfg and Config.debug and Config.debug.enabled then
         print("Shape drawing completed!")
