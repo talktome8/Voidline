@@ -187,11 +187,16 @@ function Grid:draw()
             else
                 love.graphics.setColor(color)
             end
-            -- Draw cell border for better visual clarity
-            love.graphics.rectangle('fill', x, y, self.cellSize-1, self.cellSize-1, 6, 6)
-            love.graphics.setColor(0.08,0.12,0.18,0.18)
-            love.graphics.setLineWidth(1)
-            love.graphics.rectangle('line', x, y, self.cellSize-1, self.cellSize-1, 6, 6)
+            -- ENHANCED: Modern flat design with soft corners
+            local cornerRadius = math.min(4, self.cellSize / 3) -- Adaptive corner radius
+            love.graphics.rectangle('fill', x, y, self.cellSize-1, self.cellSize-1, cornerRadius, cornerRadius)
+            
+            -- Subtle modern border for depth
+            if cellType ~= 'empty' then
+                love.graphics.setColor(0.15, 0.2, 0.25, 0.4) -- Soft border color
+                love.graphics.setLineWidth(0.5)
+                love.graphics.rectangle('line', x, y, self.cellSize-1, self.cellSize-1, cornerRadius, cornerRadius)
+            end
             
             ::continue::
         end

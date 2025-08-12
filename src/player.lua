@@ -340,14 +340,25 @@ function Player:update(dt, grid)
 
     self.moveTimer = self.moveTimer - dt
     if self.moveTimer <= 0 then
-        -- Determine input direction (keyboard first; touch optional)
+        -- Determine input direction (keyboard, mobile controls, and touch)
         local input_dx, input_dy = 0, 0
         if love.keyboard.isDown('left') or love.keyboard.isDown('a') then input_dx = -1 end
         if love.keyboard.isDown('right') or love.keyboard.isDown('d') then input_dx = 1 end
         if love.keyboard.isDown('up') or love.keyboard.isDown('w') then input_dy = -1 end
         if love.keyboard.isDown('down') or love.keyboard.isDown('s') then input_dy = 1 end
 
-        -- Basic touch steering: move toward first touch (nearest axis)
+        -- ENHANCED: Mobile controls integration
+        if _G.currentGame and _G.currentGame.mobileControls then
+            local mobileInput = _G.currentGame.mobileControls:getInput()
+            if mobileInput then
+                if mobileInput.left then input_dx = -1 end
+                if mobileInput.right then input_dx = 1 end
+                if mobileInput.up then input_dy = -1 end
+                if mobileInput.down then input_dy = 1 end
+            end
+        end
+
+        -- Enhanced touch steering: move toward first touch (nearest axis) with better responsiveness
         if input_dx == 0 and input_dy == 0 and love.touch and love.touch.getTouches then
             local touches = love.touch.getTouches()
             if touches and #touches > 0 then
@@ -357,10 +368,14 @@ function Player:update(dt, grid)
                 local py = grid.offsetY + (self.j - 1) * grid.cellSize + grid.cellSize/2
                 local dx = tx - px
                 local dy = ty - py
-                if math.abs(dx) > math.abs(dy) then
-                    input_dx = (dx > 0) and 1 or -1
-                else
-                    input_dy = (dy > 0) and 1 or -1
+                -- Require minimum distance to prevent jittery movement
+                local minDistance = grid.cellSize * 1.5
+                if math.abs(dx) > minDistance or math.abs(dy) > minDistance then
+                    if math.abs(dx) > math.abs(dy) then
+                        input_dx = (dx > 0) and 1 or -1
+                    else
+                        input_dy = (dy > 0) and 1 or -1
+                    end
                 end
             end
         end

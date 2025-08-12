@@ -13,26 +13,27 @@ Config.display = {
     vsync = true,
     resizable = true,
     
-    -- Grid cell colors
+    -- Grid cell colors - ENHANCED: Modern flat design palette
     colors = {
-        empty = {0.1, 0.1, 0.15, 1.0},          -- Dark blue for empty cells
-        claimed = {0.2, 0.6, 1.0, 0.8},         -- Bright blue for claimed territory
-        trail = {0.3, 0.8, 1.0, 0.9},           -- Light blue for player trail
-        player = {1.0, 1.0, 1.0, 1.0},          -- White for player
-        enemy = {0.9, 0.2, 0.2, 1.0},           -- Red for enemies
-        border = {0.4, 0.4, 0.6, 1.0},          -- Gray for borders
-        highlight = {1.0, 1.0, 0.3, 0.8},       -- Yellow for highlights
-        island = {0.6, 0.3, 0.9, 0.7}           -- Purple for islands
+        empty = {0.08, 0.12, 0.18, 1.0},        -- Modern dark blue-gray
+        claimed = {0.3, 0.7, 0.95, 0.85},       -- Bright modern blue
+        target_completed = {0.2, 0.9, 0.4, 0.9}, -- Modern green for completed targets
+        trail = {0.4, 0.8, 1.0, 0.95},          -- Vibrant trail blue
+        player = {1.0, 1.0, 1.0, 1.0},          -- Clean white for player
+        enemy = {0.95, 0.3, 0.3, 1.0},          -- Modern red for enemies
+        border = {0.25, 0.3, 0.35, 1.0},        -- Subtle border gray
+        highlight = {1.0, 0.85, 0.2, 0.9},      -- Warm highlight yellow
+        island = {0.7, 0.4, 0.9, 0.8}           -- Soft purple for islands
     }
 }
 
 -- === GRID SETTINGS ===
 Config.grid = {
-    -- Increased cell size for better visibility (was 6px, now much larger)
-    cellSize = 12,
-    -- Optimized grid dimensions for better gameplay balance
-    width = 60,
-    height = 45,
+    -- ENHANCED: Smaller cells for smoother movement (reduced from 12 to 8)
+    cellSize = 8,
+    -- Increased grid dimensions for more granular control
+    width = 90,
+    height = 68,
     -- Border thickness
     borderWidth = 1,
     -- Animation settings

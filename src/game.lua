@@ -126,6 +126,14 @@ function Game:initializeGame()
         self.shapePanel:setTemplate(currentShapeTemplate.name, currentShapeTemplate.points, currentShapeTemplate.requiredAccuracy or 80)
     end
 
+    -- ENHANCED: Initialize mobile controls for touch devices
+    local MobileControls = require('src.ui.mobile_controls')
+    self.mobileControls = MobileControls
+    self.mobileControls:init()
+    if ok_cfg and Config.debug and Config.debug.enabled and self.mobileControls.enabled then 
+        print("Mobile controls enabled for touch devices") 
+    end
+
     -- Combo tracking for repeated shapes
     self._shapeCombo = self._shapeCombo or {}
     self._lastShapeName = nil
@@ -430,6 +438,9 @@ function Game:update(dt)
     
     -- Update grid
     Grid:update(dt)
+    
+    -- Update mobile controls for touch devices
+    if self.mobileControls then self.mobileControls:update(dt) end
     
     -- Update player (this handles the sophisticated grid-based movement)
     Player:update(dt, Grid)
@@ -949,6 +960,9 @@ function Game:draw()
     
     -- ENHANCED: Visual life hearts in top-left corner
     self:drawLifeHearts()
+    
+    -- ENHANCED: Draw mobile controls overlay (touch devices only)
+    if self.mobileControls then self.mobileControls:draw() end
 end
 
 -- Draw visual life indicators as hearts
@@ -1116,16 +1130,40 @@ function Game:keypressed(key)
 end
 
 function Game:resize(w, h)
+    -- ENHANCED: Desktop screen handling with responsive layout
     local rightPanePx = math.floor(math.max(260, math.min(380, 0.22 * w)))
-    Grid:setSizeToWindow(w, h, 16, rightPanePx)
+    
+    -- Adaptive grid sizing based on screen resolution
+    local newCellSize = 8 -- Default from config
+    if w >= 1920 then newCellSize = 10  -- Large screens
+    elseif w >= 1366 then newCellSize = 9   -- Standard HD
+    elseif w <= 1024 then newCellSize = 7   -- Smaller screens
+    end
+    
+    Grid:setSizeToWindow(w, h, newCellSize, rightPanePx)
+    
+    -- Reposition shape panel responsively
     if self.shapePanel then
-        local panelW = 220
+        local panelW = math.min(220, rightPanePx - 20)
         local panelX = w - rightPanePx + 10
         self.shapePanel.x = panelX
         self.shapePanel.y = 16
         self.shapePanel.w = panelW
+        -- Scale panel height based on screen size
+        self.shapePanel.h = math.min(300, h * 0.4)
     end
+    
+    -- Update mobile controls for new screen dimensions
+    if self.mobileControls then
+        self.mobileControls:resize()
+    end
+    
+    -- Update draw path system reference
     if self.drawPath then self.drawPath.grid = Grid end
+    
+    if ok_cfg and Config.debug and Config.debug.enabled then 
+        print("Screen resized to", w .. "x" .. h, "- Cell size:", newCellSize, "Right pane:", rightPanePx)
+    end
 end
 
 return Game
