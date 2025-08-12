@@ -466,6 +466,25 @@ function Player:update(dt, grid)
                         local newlyClaimedCells = grid:closeArea(cellTrail)
                         do local ok4, Config4 = pcall(require, 'src.config'); if ok4 and Config4.debug and Config4.debug.enabled then print("Closed area with", newlyClaimedCells, "new cells") end end
                         
+                        -- ENHANCED: Life Recovery on Large Territory Capture
+                        if newlyClaimedCells >= 20 and _G.livesRemaining and _G.livesRemaining < 3 then
+                            _G.livesRemaining = math.min(3, _G.livesRemaining + 1)
+                            do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then print("LIFE RECOVERED! Large capture:", newlyClaimedCells, "cells. Lives:", _G.livesRemaining) end end
+                            -- Show celebration toast
+                            if _G.currentGame and _G.currentGame.toast then
+                                _G.currentGame.toast.msg = "LIFE RECOVERED! ♥"
+                                _G.currentGame.toast.timer = 2.5
+                            end
+                        elseif newlyClaimedCells >= 30 and _G.livesRemaining and _G.livesRemaining < 3 then
+                            -- Extra large captures get bonus recovery chance
+                            _G.livesRemaining = math.min(3, _G.livesRemaining + 1)
+                            do local ok, Config = pcall(require, 'src.config'); if ok and Config.debug and Config.debug.enabled then print("BONUS LIFE! Massive capture:", newlyClaimedCells, "cells. Lives:", _G.livesRemaining) end end
+                            if _G.currentGame and _G.currentGame.toast then
+                                _G.currentGame.toast.msg = "BONUS LIFE! ♥♥"
+                                _G.currentGame.toast.timer = 2.5
+                            end
+                        end
+                        
                         -- ENHANCED SHAPE SUCCESS FEEDBACK with clearer validation
                         if _G.currentGame and newlyClaimedCells > 5 then  -- Lower threshold for better response
                             local territoryPercent = _G.currentGame:calculateTerritoryPercentage()

@@ -35,7 +35,7 @@ local shapeScore = 0
 local targetPercentage = 75 -- Win condition: capture 75% of territory
 local gameOver = false
 local gameWon = false
-local livesRemaining = 3
+livesRemaining = 3  -- Make global for life recovery system
 local enemySpawnTimer = 0
 local enemySpawnDelay = 3.0
 local Enemies = {}
@@ -191,8 +191,9 @@ function Game:spawnEnemiesForLevel()
     local enemyCount = math.min(2 + level, 8)
     local isBossLevel = (level % 5 == 0)
 
+    -- ENHANCED: Varied Enemy Behavior per Level
     for i = 1, enemyCount do
-        local enemy = self:createSimpleEnemy()
+        local enemy = self:createVariedEnemyForLevel(level)
         if enemy then
             -- Scale enemy move frequency with level (faster on higher levels)
             enemy.moveDelay = math.max(0.18, (enemy.moveDelay or 0.5) - (level - 1) * 0.02)
@@ -201,7 +202,7 @@ function Game:spawnEnemiesForLevel()
     end
 
     if isBossLevel then
-        local boss = self:createSimpleEnemy()
+        local boss = self:createVariedEnemyForLevel(level, true) -- Boss variant
         if boss then
             boss.isBoss = true
             boss.health = 3
@@ -214,6 +215,58 @@ function Game:spawnEnemiesForLevel()
     self:relocateEnemiesFromClaimedTerritory()
 
     if ok_cfg and Config.debug and Config.debug.enabled then print("Spawned", #Enemies, "enemies for level", level, isBossLevel and "(Boss present)" or "") end
+end
+
+-- Create varied enemy types based on level progression
+function Game:createVariedEnemyForLevel(currentLevel, isBoss)
+    local enemy = self:createSimpleEnemy()
+    if not enemy then return nil end
+    
+    -- Level-based enemy behavior variations
+    if currentLevel <= 2 then
+        -- Early levels: Slow, predictable enemies
+        enemy.moveDelay = enemy.moveDelay * 1.3
+        enemy.behaviorType = "slow_patrol"
+        enemy.color = {0.8, 0.3, 0.3, 1} -- Red
+    elseif currentLevel <= 5 then
+        -- Mid levels: Faster enemies that chase player
+        enemy.behaviorType = "chaser"
+        enemy.chaseRange = 8
+        enemy.color = {0.9, 0.5, 0.2, 1} -- Orange
+    elseif currentLevel <= 8 then
+        -- Advanced levels: Smart enemies that predict player movement
+        enemy.behaviorType = "predictor"
+        enemy.predictionSteps = 3
+        enemy.color = {0.7, 0.2, 0.8, 1} -- Purple
+    else
+        -- Expert levels: Mixed enemy types with special abilities
+        local types = {"teleporter", "splitter", "ghost"}
+        enemy.behaviorType = types[math.random(#types)]
+        if enemy.behaviorType == "teleporter" then
+            enemy.teleportCooldown = 0
+            enemy.teleportDelay = 4.0
+            enemy.color = {0.2, 0.8, 0.9, 1} -- Cyan
+        elseif enemy.behaviorType == "splitter" then
+            enemy.splitOnHit = true
+            enemy.color = {0.9, 0.9, 0.2, 1} -- Yellow
+        elseif enemy.behaviorType == "ghost" then
+            enemy.phaseTimer = 0
+            enemy.phaseDuration = 2.0
+            enemy.color = {0.5, 0.5, 0.9, 0.7} -- Semi-transparent blue
+        end
+    end
+    
+    if isBoss then
+        -- Enhance boss with additional abilities
+        enemy.color = {1, 0.1, 0.1, 1} -- Bright red
+        enemy.size = (enemy.size or 1) * 1.5
+        if currentLevel >= 10 then
+            enemy.behaviorType = "ultimate_boss"
+            enemy.multiAbility = true
+        end
+    end
+    
+    return enemy
 end
 
 -- After a successful area closure and flood fill, remove captured enemies and apply rewards
@@ -893,6 +946,37 @@ function Game:draw()
         love.graphics.print(text, bx, by)
         if prev then love.graphics.setFont(prev) end
     end
+    
+    -- ENHANCED: Visual life hearts in top-left corner
+    self:drawLifeHearts()
+end
+
+-- Draw visual life indicators as hearts
+function Game:drawLifeHearts()
+    local heartSize = 20
+    local heartSpacing = 25
+    local startX = 15
+    local startY = 15
+    
+    for i = 1, 3 do -- Always show 3 heart slots
+        local x = startX + (i - 1) * heartSpacing
+        local y = startY
+        
+        if i <= livesRemaining then
+            -- Filled heart (red)
+            love.graphics.setColor(1, 0.2, 0.2, 1)
+            love.graphics.circle('fill', x, y, heartSize/2)
+            love.graphics.setColor(1, 0.6, 0.6, 1)
+            love.graphics.circle('fill', x-3, y-3, heartSize/4)
+            love.graphics.circle('fill', x+3, y-3, heartSize/4)
+        else
+            -- Empty heart (gray outline)
+            love.graphics.setColor(0.3, 0.3, 0.3, 0.8)
+            love.graphics.setLineWidth(2)
+            love.graphics.circle('line', x, y, heartSize/2)
+        end
+    end
+    love.graphics.setColor(1, 1, 1, 1) -- Reset color
 end
 
 -- Aggregate gameplay stats and push to the right-side panel
